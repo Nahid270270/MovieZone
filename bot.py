@@ -166,7 +166,7 @@ async def start(_, msg: Message):
 
     users_col.update_one(
         {"_id": msg.from_user.id},
-        {"$set": {"joined": datetime.now(datetime.timezone.utc), "notify": True}}, 
+        {"$set": {"joined": datetime.now(timezone.utc), "notify": True}}, # এখানে পরিবর্তন করা হয়েছে
         upsert=True
     )
     btns = InlineKeyboardMarkup([
@@ -182,7 +182,7 @@ async def feedback(_, msg: Message):
     feedback_col.insert_one({
         "user": msg.from_user.id,
         "text": msg.text.split(None, 1)[1],
-        "time": datetime.now(datetime.timezone.utc)
+        "time": datetime.now(timezone.utc) # এখানে পরিবর্তন করা হয়েছে
     })
     m = await msg.reply("আপনার মতামতের জন্য ধন্যবাদ!")
     asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=30))
@@ -295,7 +295,7 @@ async def search(_, msg: Message):
     user_id = msg.from_user.id
     users_col.update_one(
         {"_id": user_id},
-        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(datetime.timezone.utc)}},
+        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(timezone.utc)}}, # এখানে পরিবর্তন করা হয়েছে
         upsert=True
     )
 
