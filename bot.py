@@ -56,8 +56,7 @@ except OperationFailure as e:
 movies_col.create_index("language", background=True)
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
-# নতুন ইনডেক্স যোগ করা হয়েছে সালের জন্য, যদি আপনি সাল দিয়ে সার্চ করতে চান
-movies_col.create_index("year", background=True) # সাল দিয়ে দ্রুত খোঁজার জন্য
+movies_col.create_index("year", background=True) 
 print("All other necessary indexes ensured successfully.")
 
 # Flask App for health check
@@ -65,29 +64,25 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     return "Bot is running!"
-Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start() # 0000 কে 0.0.0.0 এ পরিবর্তন করা হয়েছে।
+Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start() 
 
 # Initialize a global ThreadPoolExecutor for running blocking functions (like fuzzywuzzy)
 thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # --- Helpers ---
 def clean_text(text):
-    # শুধুমাত্র অক্ষর এবং সংখ্যা রেখে টেক্সটকে ছোট হাতের অক্ষরে পরিবর্তন করে
     return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
 
 def clean_year(year_string):
-    # সাল থেকে শুধুমাত্র সংখ্যাগুলো বের করে স্ট্রিং হিসেবে রিটার্ন করে
-    return "".join(re.findall(r'\d+', str(year_string))) # str() যোগ করা হয়েছে যদি ইনপুট সংখ্যা হয়
+    return "".join(re.findall(r'\d+', str(year_string)))
 
 def extract_language(text):
     langs = ["Bengali", "Hindi", "English"]
     return next((lang for lang in langs if lang.lower() in text.lower()), None)
 
 def extract_year(text):
-    # সাল বের করার জন্য আরও ফ্লেক্সিবল রেগুলার এক্সপ্রেশন
-    match = re.search(r'\b(19|20)\d{2}\b', text) # যেমন: 1999, 2022
+    match = re.search(r'\b(19|20)\d{2}\b', text)
     if match:
-        # সাল পাওয়ার পর সেটাকে clean_year ফাংশন দিয়ে পরিষ্কার করা
         return int(clean_year(match.group(0)))
     return None
 
@@ -103,7 +98,6 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
     if not all_movie_titles_data:
         return []
 
-    # এখানে title_clean ব্যবহার করা হচ্ছে যা ইতিমধ্যেই পরিষ্কার করা হয়েছে
     choices = [item["title_clean"] for item in all_movie_titles_data]
     
     matches_raw = process.extract(query_clean, choices, limit=limit)
@@ -112,10 +106,9 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
     for matched_clean_title, score in matches_raw:
         if score >= score_cutoff:
             for movie_data in all_movie_titles_data:
-                # নিশ্চিত করা হচ্ছে যে original_title সঠিকটা আসে
                 if movie_data["title_clean"] == matched_clean_title:
                     corrected_suggestions.append({
-                        "title": movie_data["original_title"], # আসল টাইটেল ব্যবহার করা হয়েছে
+                        "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
                         "language": movie_data["language"]
                     })
@@ -129,13 +122,13 @@ async def save_post(_, msg: Message):
     if not text:
         return
 
-    extracted_year = extract_year(text) # সাল বের করা হয়েছে
+    extracted_year = extract_year(text)
     
     movie_to_save = {
         "message_id": msg.id,
         "title": text,
         "date": msg.date,
-        "year": extracted_year, # পরিষ্কার করা সাল এখানে সেভ হবে
+        "year": extracted_year,
         "language": extract_language(text),
         "title_clean": clean_text(text)
     }
@@ -153,7 +146,7 @@ async def save_post(_, msg: Message):
                     )
                     await asyncio.sleep(0.05)
                 except Exception as e:
-                    if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e): # USER_BLOCKED_BOT যোগ করা হয়েছে
+                    if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e):
                         print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
                     else:
                         print(f"Failed to send notification to user {user['_id']}: {e}")
@@ -173,7 +166,7 @@ async def start(_, msg: Message):
 
     users_col.update_one(
         {"_id": msg.from_user.id},
-        {"$set": {"joined": datetime.now(timezone.UTC), "notify": True}}, # datetime.utcnow() পরিবর্তন করা হয়েছে
+        {"$set": {"joined": datetime.now(datetime.timezone.utc), "notify": True}}, 
         upsert=True
     )
     btns = InlineKeyboardMarkup([
@@ -189,7 +182,7 @@ async def feedback(_, msg: Message):
     feedback_col.insert_one({
         "user": msg.from_user.id,
         "text": msg.text.split(None, 1)[1],
-        "time": datetime.now(timezone.UTC) # datetime.utcnow() পরিবর্তন করা হয়েছে
+        "time": datetime.now(datetime.timezone.utc)
     })
     m = await msg.reply("আপনার মতামতের জন্য ধন্যবাদ!")
     asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=30))
@@ -206,7 +199,7 @@ async def broadcast(_, msg: Message):
             count += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            if "PEER_ID_INVALID" in str(e) or "USER_IS_BLOCKED" in str(e) or "USER_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e): # USER_BLOCKED_BOT যোগ করা হয়েছে
+            if "PEER_ID_INVALID" in str(e) or "USER_IS_BLOCKED" in str(e) or "USER_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e):
                 print(f"Skipping broadcast to invalid/blocked user {user['_id']}: {e}")
             else:
                 print(f"Failed to broadcast to user {user['_id']}: {e}")
@@ -240,10 +233,8 @@ async def delete_specific_movie(_, msg: Message):
     
     movie_title_to_delete = msg.text.split(None, 1)[1].strip()
     
-    # প্রথমে সরাসরি টাইটেল ম্যাচ করার চেষ্টা
     movie_to_delete = movies_col.find_one({"title": {"$regex": re.escape(movie_title_to_delete), "$options": "i"}})
 
-    # যদি সরাসরি না মেলে, clean_text ব্যবহার করে title_clean দিয়ে চেষ্টা
     if not movie_to_delete:
         cleaned_title_to_delete = clean_text(movie_title_to_delete)
         movie_to_delete = movies_col.find_one({"title_clean": {"$regex": f"^{re.escape(cleaned_title_to_delete)}$", "$options": "i"}})
@@ -294,29 +285,27 @@ async def search(_, msg: Message):
         return
 
     if msg.chat.type == "group":
-        if len(query) < 3: # গ্রুপে সার্চের জন্য ন্যূনতম অক্ষর সংখ্যা
+        if len(query) < 3:
             return
         if msg.reply_to_message or msg.from_user.is_bot:
             return
-        if not re.search(r'[a-zA-Z0-9]', query): # শুধুমাত্র স্পেশাল ক্যারেক্টার দিয়ে সার্চ এড়িয়ে যাওয়া
+        if not re.search(r'[a-zA-Z0-9]', query):
             return
 
     user_id = msg.from_user.id
     users_col.update_one(
         {"_id": user_id},
-        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(timezone.UTC)}}, # datetime.utcnow() পরিবর্তন করা হয়েছে
+        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(datetime.timezone.utc)}},
         upsert=True
     )
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...", quote=True)
 
-    # ইউজার কোয়েরি থেকে সাল আলাদা করে পরিষ্কার করা
-    user_query_year = extract_year(query) # user_query_year একটি ইন্টিজার হবে বা None
+    user_query_year = extract_year(query) 
 
-    # সার্চ কোয়েরি তৈরি করা
     search_criteria = {"title_clean": {"$regex": f"^{re.escape(clean_text(query))}", "$options": "i"}}
     if user_query_year:
-        search_criteria["year"] = user_query_year # যদি সাল পাওয়া যায়, তাহলে সার্চ ক্রাইটেরিয়াতে যোগ করা হবে
+        search_criteria["year"] = user_query_year 
 
     matched_movies_direct = list(movies_col.find(search_criteria).limit(RESULTS_COUNT))
 
@@ -335,8 +324,6 @@ async def search(_, msg: Message):
             asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
         return
 
-    # যদি সরাসরি না মেলে, তখন আংশিক ম্যাচিং বা ভুল বানান খোঁজা
-    # এখানে আমরা সাল দিয়ে ফিল্টার করে শুধুমাত্র প্রাসঙ্গিক মুভিগুলো নিয়ে আসছি
     fuzzy_search_criteria = {"title_clean": {"$regex": clean_text(query), "$options": "i"}}
     if user_query_year:
         fuzzy_search_criteria["year"] = user_query_year
@@ -344,7 +331,7 @@ async def search(_, msg: Message):
     all_movie_data_cursor = movies_col.find(
         fuzzy_search_criteria,
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1}
-    ).limit(100) # এখানে আরও বেশি রেজাল্ট নিয়ে আসা হতে পারে, যদি প্রয়োজন হয়
+    ).limit(100)
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -353,7 +340,7 @@ async def search(_, msg: Message):
     corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
         thread_pool_executor,
         find_corrected_matches,
-        query_clean, # শুধুমাত্র পরিষ্কার করা কোয়েরি পাঠানো হচ্ছে
+        query_clean,
         all_movie_data,
         70,
         RESULTS_COUNT
@@ -371,7 +358,6 @@ async def search(_, msg: Message):
                 )
             ])
         
-        # ভাষার বাটনগুলো ইউজার কোয়েরির clean করা অংশ দিয়ে তৈরি হবে
         lang_buttons = [
             InlineKeyboardButton("বেঙ্গলি", callback_data=f"lang_Bengali_{query_clean}"),
             InlineKeyboardButton("হিন্দি", callback_data=f"lang_Hindi_{query_clean}"),
@@ -383,10 +369,9 @@ async def search(_, msg: Message):
         if msg.chat.type == "group":
             asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
     else:
-        # Google Search URL এ স্পেস থাকলে তা ঠিক করার জন্য urllib.parse.quote() ব্যবহার করা হয়েছে
-        Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+        Google Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         google_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
+            [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google Search_url)]
         ])
         
         alert = await msg.reply(
@@ -431,13 +416,12 @@ async def callback_handler(_, cq: CallbackQuery):
         await cq.message.edit_text("❌ সব মুভি ডিলিট করার প্রক্রিয়া বাতিল করা হয়েছে।")
         await cq.answer("বাতিল করা হয়েছে।")
 
-    elif data.startswith("movie_"): # এই অংশটি সম্ভবত অন্য কোথাও ব্যবহার করা হয় না, কারণ মুভি ফরওয়ার্ড হয় startpayload দিয়ে।
+    elif data.startswith("movie_"):
         await cq.answer("মুভিটি ফরওয়ার্ড করার জন্য আমাকে ব্যক্তিগতভাবে মেসেজ করুন।", show_alert=True)
 
     elif data.startswith("lang_"):
         _, lang, query_clean = data.split("_", 2)
         
-        # ভাষার সাথে মিলিয়ে সার্চ করা
         potential_lang_matches_cursor = movies_col.find(
             {"language": lang, "title_clean": {"$regex": query_clean, "$options": "i"}},
             {"title": 1, "message_id": 1, "title_clean": 1}
@@ -475,7 +459,6 @@ async def callback_handler(_, cq: CallbackQuery):
 
     elif "_" in data:
         parts = data.split("_", 3)
-        # এখানে 'has', 'no', 'soon', 'wrong' এই চারটি অ্যাকশনের জন্য চেক করা হচ্ছে
         if len(parts) == 4 and parts[0] in ["has", "no", "soon", "wrong"]: 
             action, uid, mid, raw_query = parts
             uid = int(uid)
@@ -497,7 +480,6 @@ async def callback_handler(_, cq: CallbackQuery):
                 await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
         else:
             await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
-
 
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
