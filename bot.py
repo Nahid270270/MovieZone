@@ -369,9 +369,9 @@ async def search(_, msg: Message):
         if msg.chat.type == "group":
             asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
     else:
-        Google Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+        Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         google_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google Search_url)]
+            [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
         ])
         
         alert = await msg.reply(
