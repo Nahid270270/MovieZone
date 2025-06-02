@@ -198,6 +198,33 @@ async def notify_command(_, msg: Message):
     status = "enabled" if new_value else "disabled"
     await msg.reply(f"✅ Global notifications {status}!")
 
+# New feature: Delete a specific movie by title
+@app.on_message(filters.command("delete_movie") & filters.user(ADMIN_IDS))
+async def delete_specific_movie(_, msg: Message):
+    if len(msg.command) < 2:
+        return await msg.reply("অনুগ্রহ করে মুভির টাইটেল দিন। ব্যবহার: `/delete_movie <Movie Title>`")
+    
+    movie_title_to_delete = msg.text.split(None, 1)[1].strip()
+    cleaned_title_to_delete = clean_text(movie_title_to_delete)
+
+    movie_to_delete = movies_col.find_one({"title_clean": {"$regex": f"^{re.escape(cleaned_title_to_delete)}$", "$options": "i"}})
+
+    if movie_to_delete:
+        movies_col.delete_one({"_id": movie_to_delete["_id"]})
+        await msg.reply(f"মুভি **{movie_to_delete['title']}** সফলভাবে ডিলিট করা হয়েছে।")
+    else:
+        await msg.reply(f"**{movie_title_to_delete}** নামের কোনো মুভি খুঁজে পাওয়া যায়নি।")
+
+# New feature: Delete all movies
+@app.on_message(filters.command("delete_all_movies") & filters.user(ADMIN_IDS))
+async def delete_all_movies_command(_, msg: Message):
+    confirmation_button = InlineKeyboardMarkup([
+        [InlineKeyboardButton("হ্যাঁ, সব ডিলিট করুন", callback_data="confirm_delete_all_movies")],
+        [InlineKeyboardButton("না, বাতিল করুন", callback_data="cancel_delete_all_movies")]
+    ])
+    await msg.reply("আপনি কি নিশ্চিত যে আপনি ডাটাবেস থেকে **সব মুভি** ডিলিট করতে চান? এই প্রক্রিয়াটি অপরিবর্তনীয়!", reply_markup=confirmation_button)
+
+
 @app.on_message(filters.text)
 async def search(_, msg: Message):
     raw_query = msg.text.strip()
@@ -304,7 +331,15 @@ async def search(_, msg: Message):
 async def callback_handler(_, cq: CallbackQuery):
     data = cq.data
 
-    if data.startswith("movie_"):
+    if data == "confirm_delete_all_movies":
+        movies_col.delete_many({}) # Deletes all documents in the collection
+        await cq.message.edit_text("✅ ডাটাবেস থেকে সব মুভি সফলভাবে ডিলিট করা হয়েছে।")
+        await cq.answer("সব মুভি ডিলিট করা হয়েছে।")
+    elif data == "cancel_delete_all_movies":
+        await cq.message.edit_text("❌ সব মুভি ডিলিট করার প্রক্রিয়া বাতিল করা হয়েছে।")
+        await cq.answer("বাতিল করা হয়েছে।")
+
+    elif data.startswith("movie_"):
         mid = int(data.split("_")[1])
         try:
             fwd = await app.forward_messages(cq.message.chat.id, CHANNEL_ID, mid)
@@ -365,6 +400,7 @@ async def callback_handler(_, cq: CallbackQuery):
                 await cq.answer()
         else:
             await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
+
 
 if __name__ == "__main__":
     print("Bot is starting...")
