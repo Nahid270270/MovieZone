@@ -9,7 +9,7 @@ import re
 from datetime import datetime, UTC, timedelta
 import asyncio
 import urllib.parse
-from fuzzywuzzy import process, fuzz # fuzz মডিউল ইম্পোর্ট করা হয়েছে
+from fuzzywuzzy import process, fuzz 
 from concurrent.futures import ThreadPoolExecutor
 
 # Configs - নিশ্চিত করুন এই ভেরিয়েবলগুলো আপনার এনভায়রনমেন্টে সেট করা আছে।
@@ -55,7 +55,8 @@ except OperationFailure as e:
     print(f"Error creating index 'message_id': {e}")
 
 movies_col.create_index("language", background=True)
-movies_col.create_index([("title_clean", ASCENDING)], background=True)
+# "title_clean" ইনডেক্স নতুন `clean_text` ফাংশনের সাথে সামঞ্জস্যপূর্ণ রাখতে হবে
+movies_col.create_index([("title_clean", ASCENDING)], background=True) 
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("views_count", ASCENDING)], background=True)
 print("All other necessary indexes ensured successfully.")
@@ -72,7 +73,9 @@ thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # Helpers
 def clean_text(text):
-    return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
+    # শুধুমাত্র অক্ষর এবং সংখ্যা রেখে, স্পেসগুলো ধরে রাখছি।
+    # এটি fuzzywuzzy কে শব্দ-ভিত্তিক মিল খুঁজে পেতে আরও সাহায্য করবে।
+    return re.sub(r'[^a-zA-Z0-9\s]', '', text.lower()).strip()
 
 def extract_language(text):
     langs = ["Bengali", "Hindi", "English"]
@@ -90,13 +93,13 @@ async def delete_message_later(chat_id, message_id, delay=300): # ডিলে 3
         if "MESSAGE_ID_INVALID" not in str(e) and "MESSAGE_DELETE_FORBIDDEN" not in str(e):
             print(f"Error deleting message {message_id} in chat {chat_id}: {e}")
 
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, limit=5): 
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=50, limit=5): # score_cutoff 50 এ কমানো হয়েছে
     if not all_movie_titles_data:
         return []
 
     choices = [item["title_clean"] for item in all_movie_titles_data]
     
-    # এখানে process.extract এর পরিবর্তে process.extractBests ব্যবহার করে সঠিক score_func নির্ধারণ করা হয়েছে
+    # process.extractBests ব্যবহার করে সঠিক score_func নির্ধারণ করা হয়েছে
     # fuzz.token_sort_ratio ব্যবহার করা হয়েছে যা শব্দের ক্রম এবং অতিরিক্ত/কম শব্দ হ্যান্ডেল করে।
     matches_raw = process.extractBests(query_clean, choices, score_cutoff=score_cutoff, limit=limit, scorer=fuzz.token_sort_ratio)
 
@@ -129,7 +132,7 @@ async def save_post(_, msg: Message):
         "date": msg.date,
         "year": extract_year(text),
         "language": extract_language(text),
-        "title_clean": clean_text(text),
+        "title_clean": clean_text(text), # এখানে নতুন clean_text ব্যবহার করা হচ্ছে
         "views_count": 0,
         "likes": 0,
         "dislikes": 0,
@@ -412,13 +415,10 @@ async def search(_, msg: Message):
 
     if msg.chat.type == "group":
         if len(query) < 3:
-            # গ্রুপে ছোট কোয়েরি ইগনোর করা হবে
             return
         if msg.reply_to_message or msg.from_user.is_bot:
-            # বট নিজের মেসেজ বা অন্য বটের মেসেজে রিপ্লাই দেবে না
             return
         if not re.search(r'[a-zA-Z0-9]', query):
-            # শুধুমাত্র সংখ্যা বা বিশেষ অক্ষর থাকলে ইগনোর করা হবে
             return
 
     user_id = msg.from_user.id
@@ -433,10 +433,10 @@ async def search(_, msg: Message):
 
     query_clean = clean_text(query)
     
-    # প্রথমত, সরাসরি বা কাছাকাছি regex ম্যাচ খোঁজা
+    # প্রথমত, সরাসরি বা আংশিক regex ম্যাচ খোঁজা
     # এখানে আমরা আংশিক ম্যাচকেও অন্তর্ভুক্ত করছি যাতে "Ricksha girl" এর জন্য "Rickshaw girl" এর মতো ফলাফল আসে
     matched_movies_direct = list(movies_col.find(
-        {"title_clean": {"$regex": re.escape(query_clean), "$options": "i"}} # শুধুমাত্র একটি regex ব্যবহার করা হয়েছে
+        {"title_clean": {"$regex": re.escape(query_clean), "$options": "i"}} 
     ).limit(RESULTS_COUNT))
 
     if matched_movies_direct:
@@ -459,7 +459,7 @@ async def search(_, msg: Message):
     all_movie_data_cursor = movies_col.find(
         {}, # কোনো প্রাথমিক ফিল্টার নেই, সব ডেটা নেওয়া হচ্ছে
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(1000) # লিমিট বাড়ানো হয়েছে, আপনার ডাটাবেজের আকার অনুযায়ী এটি পরিবর্তন করতে পারেন
+    ).limit(2000) # লিমিট বাড়ানো হয়েছে, আপনার ডাটাবেজের আকার অনুযায়ী এটি পরিবর্তন করতে পারেন
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -468,7 +468,7 @@ async def search(_, msg: Message):
         find_corrected_matches,
         query_clean,
         all_movie_data,
-        60, # score_cutoff 60 এ রাখা হয়েছে
+        50, # score_cutoff 50 এ কমানো হয়েছে
         RESULTS_COUNT
     )
 
@@ -561,9 +561,9 @@ async def callback_handler(_, cq: CallbackQuery):
         
         # ভাষার ভিত্তিতে ফিল্টার করে fuzzywuzzy এর জন্য ডেটা তৈরি করা
         potential_lang_matches_cursor = movies_col.find(
-            {"language": lang}, # শুধুমাত্র ভাষার ভিত্তিতে ফিল্টার করা হচ্ছে
+            {"language": lang}, 
             {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1}
-        ).limit(1000) # এখানেও বড় লিমিট সেট করা হয়েছে
+        ).limit(2000) # এখানেও বড় লিমিট সেট করা হয়েছে
 
         potential_lang_matches = list(potential_lang_matches_cursor)
         
@@ -579,7 +579,7 @@ async def callback_handler(_, cq: CallbackQuery):
             find_corrected_matches,
             query_clean,
             fuzzy_data_for_matching_lang,
-            60, 
+            50, # score_cutoff 50 এ কমানো হয়েছে
             RESULTS_COUNT
         )
 
