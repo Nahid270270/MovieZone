@@ -6,7 +6,7 @@ from flask import Flask
 from threading import Thread
 import os
 import re
-from datetime import datetime, timezone # 'timezone' ইমপোর্ট করা হয়েছে
+from datetime import datetime, UTC # UTC ইম্পোর্ট করা হয়েছে
 import asyncio
 import urllib.parse
 from fuzzywuzzy import process
@@ -56,7 +56,9 @@ except OperationFailure as e:
 movies_col.create_index("language", background=True)
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
-movies_col.create_index("year", background=True) 
+# --- নতুন ইন্ডেক্স যোগ করা হয়েছে ---
+movies_col.create_index([("views_count", ASCENDING)], background=True) # জনপ্রিয় মুভির জন্য নতুন ইন্ডেক্স
+# --- নতুন ইন্ডেক্স যোগ করা হয়েছে শেষ ---
 print("All other necessary indexes ensured successfully.")
 
 # Flask App for health check
@@ -64,17 +66,15 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     return "Bot is running!"
+# 0000 সাধারণত 0.0.0.0 এর জন্য একটি প্লেসহোল্ডার, নিশ্চিত করুন আপনার এনভায়রনমেন্টে 0.0.0.0 ব্যবহার করা হয়।
 Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start() 
 
 # Initialize a global ThreadPoolExecutor for running blocking functions (like fuzzywuzzy)
 thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
-# --- Helpers ---
+# Helpers
 def clean_text(text):
     return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
-
-def clean_year(year_string):
-    return "".join(re.findall(r'\d+', str(year_string)))
 
 def extract_language(text):
     langs = ["Bengali", "Hindi", "English"]
@@ -82,9 +82,7 @@ def extract_language(text):
 
 def extract_year(text):
     match = re.search(r'\b(19|20)\d{2}\b', text)
-    if match:
-        return int(clean_year(match.group(0)))
-    return None
+    return int(match.group(0)) if match else None
 
 async def delete_message_later(chat_id, message_id, delay=600):
     await asyncio.sleep(delay)
@@ -115,22 +113,20 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                     break
     return corrected_suggestions
 
-# --- Handlers ---
 @app.on_message(filters.chat(CHANNEL_ID))
 async def save_post(_, msg: Message):
     text = msg.text or msg.caption
     if not text:
         return
 
-    extracted_year = extract_year(text)
-    
     movie_to_save = {
         "message_id": msg.id,
         "title": text,
         "date": msg.date,
-        "year": extracted_year,
+        "year": extract_year(text),
         "language": extract_language(text),
-        "title_clean": clean_text(text)
+        "title_clean": clean_text(text),
+        "views_count": 0 # নতুন যোগ করা হয়েছে: প্রাথমিক ভিউ সংখ্যা ০
     }
     
     result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
@@ -146,7 +142,7 @@ async def save_post(_, msg: Message):
                     )
                     await asyncio.sleep(0.05)
                 except Exception as e:
-                    if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e):
+                    if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
                         print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
                     else:
                         print(f"Failed to send notification to user {user['_id']}: {e}")
@@ -159,6 +155,14 @@ async def start(_, msg: Message):
             fwd = await app.forward_messages(msg.chat.id, CHANNEL_ID, message_id)
             await msg.reply_text("আপনার অনুরোধকৃত মুভিটি এখানে পাঠানো হয়েছে।")
             asyncio.create_task(delete_message_later(msg.chat.id, fwd.id))
+
+            # --- নতুন যোগ করা কোড: views_count আপডেট ---
+            movies_col.update_one(
+                {"message_id": message_id},
+                {"$inc": {"views_count": 1}} # views_count 1 করে বাড়ানো হলো
+            )
+            # --- নতুন যোগ করা কোড শেষ ---
+
         except Exception as e:
             await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা ফরওয়ার্ড করা যায়নি।")
             print(f"Error forwarding message from start payload: {e}")
@@ -166,7 +170,7 @@ async def start(_, msg: Message):
 
     users_col.update_one(
         {"_id": msg.from_user.id},
-        {"$set": {"joined": datetime.now(timezone.utc), "notify": True}}, # এখানে পরিবর্তন করা হয়েছে
+        {"$set": {"joined": datetime.now(UTC), "notify": True}}, # datetime.utcnow() পরিবর্তন করা হয়েছে
         upsert=True
     )
     btns = InlineKeyboardMarkup([
@@ -182,7 +186,7 @@ async def feedback(_, msg: Message):
     feedback_col.insert_one({
         "user": msg.from_user.id,
         "text": msg.text.split(None, 1)[1],
-        "time": datetime.now(timezone.utc) # এখানে পরিবর্তন করা হয়েছে
+        "time": datetime.now(UTC) # datetime.utcnow() পরিবর্তন করা হয়েছে
     })
     m = await msg.reply("আপনার মতামতের জন্য ধন্যবাদ!")
     asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=30))
@@ -199,7 +203,7 @@ async def broadcast(_, msg: Message):
             count += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            if "PEER_ID_INVALID" in str(e) or "USER_IS_BLOCKED" in str(e) or "USER_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e):
+            if "PEER_ID_INVALID" in str(e) or "USER_IS_BLOCKED" in str(e) or "USER_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
                 print(f"Skipping broadcast to invalid/blocked user {user['_id']}: {e}")
             else:
                 print(f"Failed to broadcast to user {user['_id']}: {e}")
@@ -278,6 +282,43 @@ async def handle_admin_reply(_, cq: CallbackQuery):
         await cq.answer("ব্যবহারকারীকে মেসেজ পাঠানো যায়নি ❌", show_alert=True)
         print(f"Error sending admin reply to user {user_id}: {e}")
 
+# --- নতুন যোগ করা ফাংশন: /popular কমান্ড ---
+@app.on_message(filters.command("popular") & (filters.private | filters.group))
+async def popular_movies(_, msg: Message):
+    # views_count এর উপর ভিত্তি করে মুভিগুলো সাজান এবং LIMIT অনুযায়ী ফলাফল নিন
+    popular_movies_list = list(movies_col.find(
+        {"views_count": {"$exists": True}} # views_count আছে এমন মুভিগুলো নিন
+    ).sort("views_count", -1).limit(RESULTS_COUNT)) # views_count অনুযায়ী সাজিয়ে RESULTS_COUNT সংখ্যক নিন
+
+    if popular_movies_list:
+        buttons = []
+        for movie in popular_movies_list:
+            # নিশ্চিত করুন title এবং message_id বিদ্যমান
+            if "title" in movie and "message_id" in movie:
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)", # টাইটেলের সাথে ভিউ সংখ্যা যোগ করুন
+                        url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
+                    )
+                ])
+        
+        reply_markup = InlineKeyboardMarkup(buttons)
+        m = await msg.reply_text(
+            "🔥 বর্তমানে সবচেয়ে জনপ্রিয় মুভিগুলো:\n\n",
+            reply_markup=reply_markup,
+            quote=True
+        )
+        # গ্রুপ চ্যাটের ক্ষেত্রে স্বয়ংক্রিয়ভাবে মেসেজ ডিলিট করার ব্যবস্থা
+        if msg.chat.type == "group":
+            asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
+    else:
+        # কোনো জনপ্রিয় মুভি না পাওয়া গেলে
+        m = await msg.reply_text("দুঃখিত, বর্তমানে কোনো জনপ্রিয় মুভি পাওয়া যায়নি।", quote=True)
+        if msg.chat.type == "group":
+            asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=60))
+# --- নতুন যোগ করা ফাংশন শেষ ---
+
+
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
@@ -295,19 +336,17 @@ async def search(_, msg: Message):
     user_id = msg.from_user.id
     users_col.update_one(
         {"_id": user_id},
-        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(timezone.utc)}}, # এখানে পরিবর্তন করা হয়েছে
+        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(UTC)}}, # datetime.utcnow() পরিবর্তন করা হয়েছে
         upsert=True
     )
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...", quote=True)
 
-    user_query_year = extract_year(query) 
-
-    search_criteria = {"title_clean": {"$regex": f"^{re.escape(clean_text(query))}", "$options": "i"}}
-    if user_query_year:
-        search_criteria["year"] = user_query_year 
-
-    matched_movies_direct = list(movies_col.find(search_criteria).limit(RESULTS_COUNT))
+    query_clean = clean_text(query)
+    
+    matched_movies_direct = list(movies_col.find(
+        {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}}
+    ).limit(RESULTS_COUNT))
 
     if matched_movies_direct:
         await loading_message.delete()
@@ -324,18 +363,12 @@ async def search(_, msg: Message):
             asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
         return
 
-    fuzzy_search_criteria = {"title_clean": {"$regex": clean_text(query), "$options": "i"}}
-    if user_query_year:
-        fuzzy_search_criteria["year"] = user_query_year
-    
     all_movie_data_cursor = movies_col.find(
-        fuzzy_search_criteria,
+        {"title_clean": {"$regex": query_clean, "$options": "i"}},
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1}
     ).limit(100)
 
     all_movie_data = list(all_movie_data_cursor)
-
-    query_clean = clean_text(query)
 
     corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
         thread_pool_executor,
@@ -374,8 +407,16 @@ async def search(_, msg: Message):
             [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
         ])
         
-        alert = await msg.reply(
-            "দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি। নিচের বাটনে ক্লিক করে গুগলে সার্চ করতে পারেন।",
+        # এখানে not_found_text আর্গুমেন্টটি সরানো হয়েছে এবং সরাসরি টেক্সট পাস করা হয়েছে
+        alert = await msg.reply_text( 
+            """
+❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।
+এই মুভির অনুরোধটি এডমিনকে জানানো হয়েছে।
+
+যদি মুভির নামটি ভুল হয়ে থাকে, তাহলে আপনি নিচের বাটনে ক্লিক করে Google থেকে সঠিক নাম দেখে নিতে পারেন।
+
+📌 গুগলে সার্চ করতে নিচের বাটনে চাপুন।
+""",
             reply_markup=google_button,
             quote=True
         )
