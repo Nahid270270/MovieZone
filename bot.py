@@ -6,7 +6,7 @@ from flask import Flask
 from threading import Thread
 import os
 import re
-from datetime import datetime, UTC # UTC ইম্পোর্ট করা হয়েছে
+from datetime import datetime, UTC
 import asyncio
 import urllib.parse
 from fuzzywuzzy import process
@@ -33,7 +33,7 @@ feedback_col = db["feedback"]
 stats_col = db["stats"]
 users_col = db["users"]
 settings_col = db["settings"]
-requests_col = db["requests"] # <--- নতুন: মুভি অনুরোধের জন্য কালেকশন
+requests_col = db["requests"]
 
 # Indexing - Optimized for faster search
 try:
@@ -57,7 +57,7 @@ except OperationFailure as e:
 movies_col.create_index("language", background=True)
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
-movies_col.create_index([("views_count", ASCENDING)], background=True) # <--- নতুন ইন্ডেক্স: জনপ্রিয় মুভির জন্য
+movies_col.create_index([("views_count", ASCENDING)], background=True)
 print("All other necessary indexes ensured successfully.")
 
 # Flask App for health check
@@ -82,7 +82,7 @@ def extract_year(text):
     match = re.search(r'\b(19|20)\d{2}\b', text)
     return int(match.group(0)) if match else None
 
-async def delete_message_later(chat_id, message_id, delay=600):
+async def delete_message_later(chat_id, message_id, delay=300): # ডিলে 300 সেকেন্ড (5 মিনিট) সেট করা হয়েছে
     await asyncio.sleep(delay)
     try:
         await app.delete_messages(chat_id, message_id)
@@ -124,7 +124,10 @@ async def save_post(_, msg: Message):
         "year": extract_year(text),
         "language": extract_language(text),
         "title_clean": clean_text(text),
-        "views_count": 0 # <--- নতুন: প্রাথমিক ভিউ সংখ্যা ০
+        "views_count": 0,
+        "likes": 0, # নতুন: লাইক সংখ্যা
+        "dislikes": 0, # নতুন: ডিসলাইক সংখ্যা
+        "rated_by": [] # নতুন: রেটিং দেওয়া ব্যবহারকারীদের আইডি
     }
     
     result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
@@ -134,10 +137,11 @@ async def save_post(_, msg: Message):
         if setting and setting.get("value"):
             for user in users_col.find({"notify": {"$ne": False}}):
                 try:
-                    await app.send_message(
+                    m = await app.send_message( # এখানে m ভেরিয়েবলে মেসেজ সেভ করা হয়েছে
                         user["_id"],
                         f"নতুন মুভি আপলোড হয়েছে:\n**{text.splitlines()[0][:100]}**\nএখনই সার্চ করে দেখুন!"
                     )
+                    asyncio.create_task(delete_message_later(m.chat.id, m.id)) # অটো ডিলিট যোগ করা হয়েছে
                     await asyncio.sleep(0.05)
                 except Exception as e:
                     if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
@@ -151,8 +155,10 @@ async def start(_, msg: Message):
         message_id = int(msg.command[1].replace("watch_", ""))
         try:
             fwd = await app.forward_messages(msg.chat.id, CHANNEL_ID, message_id)
-            await msg.reply_text("আপনার অনুরোধকৃত মুভিটি এখানে পাঠানো হয়েছে।")
-            asyncio.create_task(delete_message_later(msg.chat.id, fwd.id))
+            # এখানে ফরওয়ার্ড করা মেসেজটি বটের রেসপন্স নয়, তাই এটি ডিলিট হবে না।
+            reply_msg = await msg.reply_text("আপনার অনুরোধকৃত মুভিটি এখানে পাঠানো হয়েছে।")
+            asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id)) # বটের রেসপন্স ডিলিট হবে
+            asyncio.create_task(delete_message_later(msg.chat.id, fwd.id)) # ফরওয়ার্ডেড মেসেজটিও ডিলিট হবে
 
             # --- নতুন যোগ করা কোড: views_count আপডেট ---
             movies_col.update_one(
@@ -162,7 +168,8 @@ async def start(_, msg: Message):
             # --- নতুন যোগ করা কোড শেষ ---
 
         except Exception as e:
-            await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা ফরওয়ার্ড করা যায়নি।")
+            error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা ফরওয়ার্ড করা যায়নি।")
+            asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id)) # বটের রেসপন্স ডিলিট হবে
             print(f"Error forwarding message from start payload: {e}")
         return
 
@@ -175,24 +182,29 @@ async def start(_, msg: Message):
         [InlineKeyboardButton("আপডেট চ্যানেল", url=UPDATE_CHANNEL)],
         [InlineKeyboardButton("অ্যাডমিনের সাথে যোগাযোগ", url="https://t.me/ctgmovies23")]
     ])
-    await msg.reply_photo(photo=START_PIC, caption="আমাকে মুভির নাম লিখে পাঠান, আমি খুঁজে দেবো।", reply_markup=btns)
+    start_message = await msg.reply_photo(photo=START_PIC, caption="আমাকে মুভির নাম লিখে পাঠান, আমি খুঁজে দেবো।", reply_markup=btns)
+    asyncio.create_task(delete_message_later(start_message.chat.id, start_message.id)) # বটের রেসপন্স ডিলিট হবে
 
 @app.on_message(filters.command("feedback") & filters.private)
 async def feedback(_, msg: Message):
     if len(msg.command) < 2:
-        return await msg.reply("অনুগ্রহ করে /feedback এর পর আপনার মতামত লিখুন।")
+        error_msg = await msg.reply("অনুগ্রহ করে /feedback এর পর আপনার মতামত লিখুন।")
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id)) # বটের রেসপন্স ডিলিট হবে
+        return
     feedback_col.insert_one({
         "user": msg.from_user.id,
         "text": msg.text.split(None, 1)[1],
         "time": datetime.now(UTC)
     })
     m = await msg.reply("আপনার মতামতের জন্য ধন্যবাদ!")
-    asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=30))
+    asyncio.create_task(delete_message_later(m.chat.id, m.id)) # বটের রেসপন্স ডিলিট হবে
 
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast(_, msg: Message):
     if len(msg.command) < 2:
-        return await msg.reply("ব্যবহার: /broadcast আপনার মেসেজ এখানে")
+        error_msg = await msg.reply("ব্যবহার: /broadcast আপনার মেসেজ এখানে")
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id)) # বটের রেসপন্স ডিলিট হবে
+        return
     count = 0
     message_to_send = msg.text.split(None, 1)[1]
     for user in users_col.find():
@@ -205,21 +217,25 @@ async def broadcast(_, msg: Message):
                 print(f"Skipping broadcast to invalid/blocked user {user['_id']}: {e}")
             else:
                 print(f"Failed to broadcast to user {user['_id']}: {e}")
-    await msg.reply(f"{count} জন ব্যবহারকারীর কাছে ব্রডকাস্ট পাঠানো হয়েছে।")
+    reply_msg = await msg.reply(f"{count} জন ব্যবহারকারীর কাছে ব্রডকাস্ট পাঠানো হয়েছে।")
+    asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id)) # বটের রেসপন্স ডিলিট হবে
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
 async def stats(_, msg: Message):
-    await msg.reply(
+    stats_msg = await msg.reply(
         f"মোট ব্যবহারকারী: {users_col.count_documents({})}\n"
         f"মোট মুভি: {movies_col.count_documents({})}\n"
         f"মোট ফিডব্যাক: {feedback_col.count_documents({})}\n"
-        f"মোট অনুরোধ: {requests_col.count_documents({})}" # <--- নতুন: অনুরোধের সংখ্যা
+        f"মোট অনুরোধ: {requests_col.count_documents({})}"
     )
+    asyncio.create_task(delete_message_later(stats_msg.chat.id, stats_msg.id)) # বটের রেসপন্স ডিলিট হবে
 
 @app.on_message(filters.command("notify") & filters.user(ADMIN_IDS))
 async def notify_command(_, msg: Message):
     if len(msg.command) != 2 or msg.command[1] not in ["on", "off"]:
-        return await msg.reply("ব্যবহার: /notify on অথবা /notify off")
+        error_msg = await msg.reply("ব্যবহার: /notify on অথবা /notify off")
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id)) # বটের রেসপন্স ডিলিট হবে
+        return
     new_value = True if msg.command[1] == "on" else False
     settings_col.update_one(
         {"key": "global_notify"},
@@ -227,12 +243,15 @@ async def notify_command(_, msg: Message):
         upsert=True
     )
     status = "চালু" if new_value else "বন্ধ"
-    await msg.reply(f"✅ গ্লোবাল নোটিফিকেশন {status} করা হয়েছে!")
+    reply_msg = await msg.reply(f"✅ গ্লোবাল নোটিফিকেশন {status} করা হয়েছে!")
+    asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id)) # বটের রেসপন্স ডিলিট হবে
 
 @app.on_message(filters.command("delete_movie") & filters.user(ADMIN_IDS))
 async def delete_specific_movie(_, msg: Message):
     if len(msg.command) < 2:
-        return await msg.reply("অনুগ্রহ করে মুভির টাইটেল দিন। ব্যবহার: `/delete_movie <মুভির টাইটেল>`")
+        error_msg = await msg.reply("অনুগ্রহ করে মুভির টাইটেল দিন। ব্যবহার: `/delete_movie <মুভির টাইটেল>`")
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id)) # বটের রেসপন্স ডিলিট হবে
+        return
     
     movie_title_to_delete = msg.text.split(None, 1)[1].strip()
     
@@ -244,9 +263,11 @@ async def delete_specific_movie(_, msg: Message):
 
     if movie_to_delete:
         movies_col.delete_one({"_id": movie_to_delete["_id"]})
-        await msg.reply(f"মুভি **{movie_to_delete['title']}** সফলভাবে ডিলিট করা হয়েছে।")
+        reply_msg = await msg.reply(f"মুভি **{movie_to_delete['title']}** সফলভাবে ডিলিট করা হয়েছে।")
+        asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id)) # বটের রেসপন্স ডিলিট হবে
     else:
-        await msg.reply(f"**{movie_title_to_delete}** নামের কোনো মুভি খুঁজে পাওয়া যায়নি।")
+        error_msg = await msg.reply(f"**{movie_title_to_delete}** নামের কোনো মুভি খুঁজে পাওয়া যায়নি।")
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id)) # বটের রেসপন্স ডিলিট হবে
 
 @app.on_message(filters.command("delete_all_movies") & filters.user(ADMIN_IDS))
 async def delete_all_movies_command(_, msg: Message):
@@ -254,7 +275,8 @@ async def delete_all_movies_command(_, msg: Message):
         [InlineKeyboardButton("হ্যাঁ, সব ডিলিট করুন", callback_data="confirm_delete_all_movies")],
         [InlineKeyboardButton("না, বাতিল করুন", callback_data="cancel_delete_all_movies")]
     ])
-    await msg.reply("আপনি কি নিশ্চিত যে আপনি ডাটাবেস থেকে **সব মুভি** ডিলিট করতে চান? এই প্রক্রিয়াটি অপরিবর্তনীয়!", reply_markup=confirmation_button)
+    reply_msg = await msg.reply("আপনি কি নিশ্চিত যে আপনি ডাটাবেস থেকে **সব মুভি** ডিলিট করতে চান? এই প্রক্রিয়াটি অপরিবর্তনীয়!", reply_markup=confirmation_button)
+    asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id)) # বটের রেসপন্স ডিলিট হবে
 
 @app.on_callback_query(filters.regex(r"^noresult_(wrong|notyet|uploaded|coming)_(\d+)_([^ ]+)$") & filters.user(ADMIN_IDS))
 async def handle_admin_reply(_, cq: CallbackQuery):
@@ -272,7 +294,8 @@ async def handle_admin_reply(_, cq: CallbackQuery):
     }
 
     try:
-        await app.send_message(user_id, messages[reason])
+        m_sent = await app.send_message(user_id, messages[reason])
+        asyncio.create_task(delete_message_later(m_sent.chat.id, m_sent.id)) # বটের রেসপন্স ডিলিট হবে
         await cq.answer("ব্যবহারকারীকে জানানো হয়েছে ✅", show_alert=True)
         await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton(f"✅ উত্তর দেওয়া হয়েছে: {messages[reason].split(' ')[0]}", callback_data="noop")
@@ -281,7 +304,6 @@ async def handle_admin_reply(_, cq: CallbackQuery):
         await cq.answer("ব্যবহারকারীকে মেসেজ পাঠানো যায়নি ❌", show_alert=True)
         print(f"Error sending admin reply to user {user_id}: {e}")
 
-# --- নতুন ফাংশন যোগ করা হয়েছে: /popular কমান্ড ---
 @app.on_message(filters.command("popular") & (filters.private | filters.group))
 async def popular_movies(_, msg: Message):
     popular_movies_list = list(movies_col.find(
@@ -292,9 +314,11 @@ async def popular_movies(_, msg: Message):
         buttons = []
         for movie in popular_movies_list:
             if "title" in movie and "message_id" in movie:
+                # রেটিং দেখানোর জন্য নতুন টেক্সট যোগ করা হয়েছে
+                rating_text = f"👍 {movie.get('likes', 0)} | 👎 {movie.get('dislikes', 0)}"
                 buttons.append([
                     InlineKeyboardButton(
-                        text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)",
+                        text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ) {rating_text}",
                         url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                     )
                 ])
@@ -305,19 +329,17 @@ async def popular_movies(_, msg: Message):
             reply_markup=reply_markup,
             quote=True
         )
-        if msg.chat.type == "group":
-            asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
+        asyncio.create_task(delete_message_later(m.chat.id, m.id)) # বটের রেসপন্স ডিলিট হবে
     else:
         m = await msg.reply_text("দুঃখিত, বর্তমানে কোনো জনপ্রিয় মুভি পাওয়া যায়নি।", quote=True)
-        if msg.chat.type == "group":
-            asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=60))
-# --- /popular কমান্ড শেষ ---
+        asyncio.create_task(delete_message_later(m.chat.id, m.id)) # বটের রেসপন্স ডিলিট হবে
 
-# --- নতুন ফাংশন যোগ করা হয়েছে: /request কমান্ড ---
 @app.on_message(filters.command("request") & filters.private)
 async def request_movie(_, msg: Message):
     if len(msg.command) < 2:
-        return await msg.reply("অনুগ্রহ করে /request এর পর মুভির নাম লিখুন। উদাহরণ: `/request The Creator`", quote=True)
+        error_msg = await msg.reply("অনুগ্রহ করে /request এর পর মুভির নাম লিখুন। উদাহরণ: `/request The Creator`", quote=True)
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id)) # বটের রেসপন্স ডিলিট হবে
+        return
     
     movie_name = msg.text.split(None, 1)[1].strip()
     user_id = msg.from_user.id
@@ -332,7 +354,7 @@ async def request_movie(_, msg: Message):
     })
 
     m = await msg.reply(f"আপনার অনুরোধ **'{movie_name}'** সফলভাবে জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।", quote=True)
-    asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=30))
+    asyncio.create_task(delete_message_later(m.chat.id, m.id)) # বটের রেসপন্স ডিলিট হবে
 
     encoded_movie_name = urllib.parse.quote_plus(movie_name)
     admin_request_btns = InlineKeyboardMarkup([[
@@ -352,42 +374,6 @@ async def request_movie(_, msg: Message):
             )
         except Exception as e:
             print(f"Could not notify admin {admin_id} about request: {e}")
-# --- /request কমান্ড শেষ ---
-
-# --- নতুন ফাংশন যোগ করা হয়েছে: অ্যাডমিনদের জন্য অনুরোধ কলব্যাক হ্যান্ডলার ---
-@app.on_callback_query(filters.regex(r"req_(fulfilled|rejected)_(\d+)_([^ ]+)$") & filters.user(ADMIN_IDS))
-async def handle_request_callback(_, cq: CallbackQuery):
-    parts = cq.data.split("_", 3)
-    action = parts[1]
-    user_id = int(parts[2])
-    encoded_movie_name = parts[3]
-    movie_name = urllib.parse.unquote_plus(encoded_movie_name)
-
-    requests_col.update_one(
-        {"user_id": user_id, "movie_name": movie_name, "status": "pending"},
-        {"$set": {"status": action, "admin_response_time": datetime.now(UTC)}}
-    )
-
-    user_message = ""
-    if action == "fulfilled":
-        user_message = f"✅ আপনার অনুরোধকৃত মুভি **'{movie_name}'** সম্ভবত এখন পাওয়া যাচ্ছে! অনুগ্রহ করে আবার সার্চ করে দেখুন।"
-        await cq.answer(f"অনুরোধ '{movie_name}' সম্পন্ন হিসাবে চিহ্নিত করা হয়েছে।", show_alert=True)
-    elif action == "rejected":
-        user_message = f"❌ দুঃখিত! আপনার অনুরোধকৃত মুভি **'{movie_name}'** এই মুহূর্তে সরবরাহ করা সম্ভব নয়। অনুগ্রহ করে অন্য কোনো মুভি দেখুন।"
-        await cq.answer(f"অনুরোধ '{movie_name}' বাতিল হিসাবে চিহ্নিত করা হয়েছে।", show_alert=True)
-    
-    try:
-        m_sent = await app.send_message(user_id, user_message)
-        asyncio.create_task(delete_message_later(m_sent.chat.id, m_sent.id, delay=60))
-
-        await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"✅ উত্তর দেওয়া হয়েছে: {action}", callback_data="noop")
-        ]]))
-    except Exception as e:
-        await cq.answer("ব্যবহারকারীকে মেসেজ পাঠানো যায়নি ❌", show_alert=True)
-        print(f"Error sending request fulfillment/rejection message to user {user_id}: {e}")
-# --- অনুরোধ কলব্যাক হ্যান্ডলার শেষ ---
-
 
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
@@ -411,31 +397,44 @@ async def search(_, msg: Message):
     )
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...", quote=True)
+    asyncio.create_task(delete_message_later(loading_message.chat.id, loading_message.id)) # বটের রেসপন্স ডিলিট হবে
 
     query_clean = clean_text(query)
     
+    # এখানে direct search-এর জন্য একটি অতিরিক্ত $or কন্ডিশন যোগ করা হয়েছে
+    # যাতে title_clean এবং title উভয় ক্ষেত্রেই query_clean ম্যাচ করে
     matched_movies_direct = list(movies_col.find(
-        {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}}
+        {"$or": [
+            {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}},
+            {"title": {"$regex": re.escape(query), "$options": "i"}} # Original title search
+        ]}
     ).limit(RESULTS_COUNT))
 
     if matched_movies_direct:
         await loading_message.delete()
         buttons = []
         for movie in matched_movies_direct:
+            # রেটিং এবং ভিউ সংখ্যা যোগ করা হয়েছে
+            rating_text = f"👍 {movie.get('likes', 0)} | 👎 {movie.get('dislikes', 0)}"
             buttons.append([
                 InlineKeyboardButton(
-                    text=movie["title"][:40],
+                    text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ) {rating_text}",
                     url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                 )
             ])
+            # রেটিং বাটন যোগ করা হয়েছে
+            buttons.append([
+                InlineKeyboardButton("👍 লাইক", callback_data=f"like_{movie['message_id']}_{user_id}"),
+                InlineKeyboardButton("👎 ডিসলাইক", callback_data=f"dislike_{movie['message_id']}_{user_id}")
+            ])
+
         m = await msg.reply("🎬 নিচের রেজাল্টগুলো পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
-        if msg.chat.type == "group":
-            asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
+        asyncio.create_task(delete_message_later(m.chat.id, m.id)) # বটের রেসপন্স ডিলিট হবে
         return
 
     all_movie_data_cursor = movies_col.find(
         {"title_clean": {"$regex": query_clean, "$options": "i"}},
-        {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1}
+        {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "likes": 1, "dislikes": 1, "views_count": 1}
     ).limit(100)
 
     all_movie_data = list(all_movie_data_cursor)
@@ -454,11 +453,18 @@ async def search(_, msg: Message):
     if corrected_suggestions:
         buttons = []
         for movie in corrected_suggestions:
+            # রেটিং এবং ভিউ সংখ্যা যোগ করা হয়েছে
+            rating_text = f"👍 {movie.get('likes', 0)} | 👎 {movie.get('dislikes', 0)}"
             buttons.append([
                 InlineKeyboardButton(
-                    text=movie["title"][:40],
+                    text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ) {rating_text}",
                     url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                 )
+            ])
+            # রেটিং বাটন যোগ করা হয়েছে
+            buttons.append([
+                InlineKeyboardButton("👍 লাইক", callback_data=f"like_{movie['message_id']}_{user_id}"),
+                InlineKeyboardButton("👎 ডিসলাইক", callback_data=f"dislike_{movie['message_id']}_{user_id}")
             ])
         
         lang_buttons = [
@@ -469,12 +475,10 @@ async def search(_, msg: Message):
         buttons.append(lang_buttons)
 
         m = await msg.reply("🔍 সরাসরি মিলে যায়নি, তবে কাছাকাছি কিছু পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
-        if msg.chat.type == "group":
-            asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
+        asyncio.create_task(delete_message_later(m.chat.id, m.id)) # বটের রেসপন্স ডিলিট হবে
     else:
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         
-        # --- এখানে নতুন রিকোয়েস্ট বাটন সহ মার্কআপ যোগ করা হয়েছে ---
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
         
@@ -482,7 +486,6 @@ async def search(_, msg: Message):
             google_button_row,
             [request_button]
         ])
-        # --- পরিবর্তন শেষ ---
 
         alert = await msg.reply_text( 
             """
@@ -492,11 +495,10 @@ async def search(_, msg: Message):
 
 অথবা, আপনার পছন্দের মুভিটি আমাদের কাছে অনুরোধ করতে পারেন।
 """,
-            reply_markup=reply_markup_for_no_result, # নতুন রিপ্লাই মার্কআপ ব্যবহার করা হয়েছে
+            reply_markup=reply_markup_for_no_result,
             quote=True
         )
-        if msg.chat.type == "group":
-            asyncio.create_task(delete_message_later(alert.chat.id, alert.id, delay=60))
+        asyncio.create_task(delete_message_later(alert.chat.id, alert.id)) # বটের রেসপন্স ডিলিট হবে
 
         encoded_query = urllib.parse.quote_plus(query)
         admin_btns = InlineKeyboardMarkup([[
@@ -526,10 +528,12 @@ async def callback_handler(_, cq: CallbackQuery):
 
     if data == "confirm_delete_all_movies":
         movies_col.delete_many({})
-        await cq.message.edit_text("✅ ডাটাবেস থেকে সব মুভি সফলভাবে ডিলিট করা হয়েছে।")
+        reply_msg = await cq.message.edit_text("✅ ডাটাবেস থেকে সব মুভি সফলভাবে ডিলিট করা হয়েছে।")
+        asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
         await cq.answer("সব মুভি ডিলিট করা হয়েছে।")
     elif data == "cancel_delete_all_movies":
-        await cq.message.edit_text("❌ সব মুভি ডিলিট করার প্রক্রিয়া বাতিল করা হয়েছে।")
+        reply_msg = await cq.message.edit_text("❌ সব মুভি ডিলিট করার প্রক্রিয়া বাতিল করা হয়েছে।")
+        asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
         await cq.answer("বাতিল করা হয়েছে।")
 
     elif data.startswith("movie_"):
@@ -540,13 +544,14 @@ async def callback_handler(_, cq: CallbackQuery):
         
         potential_lang_matches_cursor = movies_col.find(
             {"language": lang, "title_clean": {"$regex": query_clean, "$options": "i"}},
-            {"title": 1, "message_id": 1, "title_clean": 1}
+            {"title": 1, "message_id": 1, "title_clean": 1, "likes": 1, "dislikes": 1, "views_count": 1}
         ).limit(50)
 
         potential_lang_matches = list(potential_lang_matches_cursor)
         
         fuzzy_data_for_matching_lang = [
-            {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"], "language": lang}
+            {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"], 
+             "language": lang, "likes": m.get("likes", 0), "dislikes": m.get("dislikes", 0), "views_count": m.get("views_count", 0)}
             for m in potential_lang_matches
         ]
         
@@ -561,19 +566,24 @@ async def callback_handler(_, cq: CallbackQuery):
         )
 
         if matches_filtered_by_lang:
-            buttons = [
-                [InlineKeyboardButton(m["title"][:40], url=f"https://t.me/{app.me.username}?start=watch_{m['message_id']}")]
-                for m in matches_filtered_by_lang[:RESULTS_COUNT]
-            ]
-            await cq.message.edit_text(
+            buttons = []
+            for m in matches_filtered_by_lang[:RESULTS_COUNT]:
+                rating_text = f"👍 {m.get('likes', 0)} | 👎 {m.get('dislikes', 0)}"
+                buttons.append([InlineKeyboardButton(f"{m['title'][:40]} ({m.get('views_count',0)} ভিউ) {rating_text}", url=f"https://t.me/{app.me.username}?start=watch_{m['message_id']}")])
+                buttons.append([
+                    InlineKeyboardButton("👍 লাইক", callback_data=f"like_{m['message_id']}_{cq.from_user.id}"),
+                    InlineKeyboardButton("👎 ডিসলাইক", callback_data=f"dislike_{m['message_id']}_{cq.from_user.id}")
+                ])
+            reply_msg = await cq.message.edit_text(
                 f"ফলাফল ({lang}) - নিচের থেকে সিলেক্ট করুন:",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
+            asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
         else:
             await cq.answer("এই ভাষায় কিছু পাওয়া যায়নি।", show_alert=True)
         await cq.answer()
 
-    elif data.startswith("request_movie_"): # <--- নতুন: ইনলাইন রিকোয়েস্ট বাটন হ্যান্ডলার
+    elif data.startswith("request_movie_"):
         _, user_id_str, encoded_movie_name = data.split("_", 2)
         user_id = int(user_id_str)
         movie_name = urllib.parse.unquote_plus(encoded_movie_name)
@@ -608,14 +618,65 @@ async def callback_handler(_, cq: CallbackQuery):
                 print(f"Could not notify admin {admin_id} about request from callback: {e}")
         
         try:
-            await cq.message.edit_text(
+            edited_msg = await cq.message.edit_text(
                 f"❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।\n\n"
                 f"আপনার অনুরোধ **'{movie_name}'** জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।",
                 reply_markup=None # বাটনগুলো সরিয়ে নেওয়া হলো
             )
+            asyncio.create_task(delete_message_later(edited_msg.chat.id, edited_msg.id))
         except Exception as e:
             print(f"Error editing user message after request: {e}")
 
+    # --- রেটিং হ্যান্ডলার যুক্ত করা হয়েছে ---
+    elif data.startswith("like_") or data.startswith("dislike_"):
+        action, message_id_str, user_id_str = data.split("_", 2)
+        movie_message_id = int(message_id_str)
+        user_id = int(user_id_str)
+
+        movie = movies_col.find_one({"message_id": movie_message_id})
+        
+        if not movie:
+            await cq.answer("দুঃখিত, এই মুভিটি খুঁজে পাওয়া যায়নি।", show_alert=True)
+            return
+
+        if user_id in movie.get("rated_by", []):
+            await cq.answer("আপনি ইতিমধ্যেই এই মুভিতে রেটিং দিয়েছেন!", show_alert=True)
+            return
+
+        # ইউজার রেটিং দিয়েছে এমন তথ্য যুক্ত করা হয়েছে
+        update_query = {"$inc": {}, "$push": {"rated_by": user_id}}
+        if action == "like":
+            update_query["$inc"]["likes"] = 1
+        elif action == "dislike":
+            update_query["$inc"]["dislikes"] = 1
+        
+        movies_col.update_one({"message_id": movie_message_id}, update_query)
+        
+        # আপডেট করা রেটিং সহ মেসেজ এডিট করা
+        updated_movie = movies_col.find_one({"message_id": movie_message_id})
+        
+        # নতুন বাটন তৈরি করা যাতে আপডেট করা রেটিং দেখানো যায়
+        updated_buttons = []
+        # মূল মুভি লিঙ্ক বাটন
+        updated_buttons.append([
+            InlineKeyboardButton(
+                text=f"{updated_movie['title'][:40]} ({updated_movie.get('views_count', 0)} ভিউ) 👍 {updated_movie.get('likes', 0)} | 👎 {updated_movie.get('dislikes', 0)}",
+                url=f"https://t.me/{app.me.username}?start=watch_{updated_movie['message_id']}"
+            )
+        ])
+        # রেটিং বাটন - এখন নিষ্ক্রিয় করা হয়েছে বা স্ট্যাটাস দেখানো হয়েছে
+        updated_buttons.append([
+            InlineKeyboardButton(f"👍 লাইক ({updated_movie.get('likes', 0)})", callback_data="noop"), # noop মানে কোনো কাজ হবে না
+            InlineKeyboardButton(f"👎 ডিসলাইক ({updated_movie.get('dislikes', 0)})", callback_data="noop")
+        ])
+
+        try:
+            await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(updated_buttons))
+            await cq.answer("আপনার রেটিং রেকর্ড করা হয়েছে! ধন্যবাদ।", show_alert=True)
+        except Exception as e:
+            print(f"Error editing message after rating: {e}")
+            await cq.answer("রেটিং আপডেট করতে সমস্যা হয়েছে।", show_alert=True)
+    # --- রেটিং হ্যান্ডলার শেষ ---
 
     elif "_" in data:
         parts = data.split("_", 3)
@@ -631,7 +692,7 @@ async def callback_handler(_, cq: CallbackQuery):
             if action in responses:
                 try:
                     m = await app.send_message(uid, responses[action])
-                    asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=30))
+                    asyncio.create_task(delete_message_later(m.chat.id, m.id))
                     await cq.answer("অ্যাডমিনের পক্ষ থেকে উত্তর পাঠানো হয়েছে।")
                 except Exception as e:
                     await cq.answer("ইউজারকে বার্তা পাঠাতে সমস্যা হয়েছে।", show_alert=True)
