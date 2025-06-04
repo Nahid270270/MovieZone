@@ -2,6 +2,7 @@ Pyrofork
 tgcrypto
 pymongo[srv]
 motor
+Flask
 marshmallow
 umongo
 requests
