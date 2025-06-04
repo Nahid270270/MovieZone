@@ -9,7 +9,7 @@ import re
 from datetime import datetime, UTC, timedelta
 import asyncio
 import urllib.parse
-from fuzzywuzzy import process
+from fuzzywuzzy import process, fuzz # fuzz মডিউল ইম্পোর্ট করা হয়েছে
 from concurrent.futures import ThreadPoolExecutor
 
 # Configs - নিশ্চিত করুন এই ভেরিয়েবলগুলো আপনার এনভায়রনমেন্টে সেট করা আছে।
@@ -96,23 +96,22 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, 
 
     choices = [item["title_clean"] for item in all_movie_titles_data]
     
-    # process.extract fuzzywuzzy ফাংশনটি দুটি স্ট্রিংয়ের মধ্যে সাদৃশ্য স্কোর গণনা করে।
-    # query_clean এর সাথে choices লিস্টের প্রতিটি আইটেমের সাদৃশ্য পরীক্ষা করে।
-    # limit প্যারামিটার সেরা n-সংখ্যক ম্যাচ ফিরিয়ে দেয়।
-    matches_raw = process.extract(query_clean, choices, limit=limit)
+    # এখানে process.extract এর পরিবর্তে process.extractBests ব্যবহার করে সঠিক score_func নির্ধারণ করা হয়েছে
+    # fuzz.token_sort_ratio ব্যবহার করা হয়েছে যা শব্দের ক্রম এবং অতিরিক্ত/কম শব্দ হ্যান্ডেল করে।
+    matches_raw = process.extractBests(query_clean, choices, score_cutoff=score_cutoff, limit=limit, scorer=fuzz.token_sort_ratio)
 
     corrected_suggestions = []
     for matched_clean_title, score in matches_raw:
-        if score >= score_cutoff:
-            for movie_data in all_movie_titles_data:
-                if movie_data["title_clean"] == matched_clean_title:
-                    corrected_suggestions.append({
-                        "title": movie_data["original_title"],
-                        "message_id": movie_data["message_id"],
-                        "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0)
-                    })
-                    break
+        # score_cutoff process.extractBests এ সরাসরি ব্যবহার করা হয়েছে, তাই এখানে আর if condition এর প্রয়োজন নেই।
+        for movie_data in all_movie_titles_data:
+            if movie_data["title_clean"] == matched_clean_title:
+                corrected_suggestions.append({
+                    "title": movie_data["original_title"],
+                    "message_id": movie_data["message_id"],
+                    "language": movie_data["language"],
+                    "views_count": movie_data.get("views_count", 0)
+                })
+                break
     return corrected_suggestions
 
 # Global dictionary to keep track of last start command time per user
@@ -435,11 +434,9 @@ async def search(_, msg: Message):
     query_clean = clean_text(query)
     
     # প্রথমত, সরাসরি বা কাছাকাছি regex ম্যাচ খোঁজা
+    # এখানে আমরা আংশিক ম্যাচকেও অন্তর্ভুক্ত করছি যাতে "Ricksha girl" এর জন্য "Rickshaw girl" এর মতো ফলাফল আসে
     matched_movies_direct = list(movies_col.find(
-        {"$or": [
-            {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}}, # সম্পূর্ণ ম্যাচ
-            {"title_clean": {"$regex": re.escape(query_clean), "$options": "i"}} # আংশিক ম্যাচ
-        ]}
+        {"title_clean": {"$regex": re.escape(query_clean), "$options": "i"}} # শুধুমাত্র একটি regex ব্যবহার করা হয়েছে
     ).limit(RESULTS_COUNT))
 
     if matched_movies_direct:
@@ -457,13 +454,12 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # যদি সরাসরি ম্যাচ না হয়, তবে fuzzywuzzy ব্যবহার করে সম্ভাব্য কাছাকাছি ম্যাচ খোঁজা
+    # যদি সরাসরি বা আংশিক regex ম্যাচ না হয়, তবে fuzzywuzzy ব্যবহার করে সম্ভাব্য কাছাকাছি ম্যাচ খোঁজা
     # এখানে, আমরা সব মুভির ডেটা নিয়ে আসছি (বা একটি বড় অংশ) যাতে fuzzywuzzy ভালোভাবে কাজ করতে পারে।
-    # এটি `title_clean` এর উপর আর প্রাথমিক regex ফিল্টার করছে না, যা আগের সমস্যাটির মূল কারণ ছিল।
     all_movie_data_cursor = movies_col.find(
-        {}, # এখানে কোনো প্রাথমিক ফিল্টার নেই, সব ডেটা নেওয়া হচ্ছে
+        {}, # কোনো প্রাথমিক ফিল্টার নেই, সব ডেটা নেওয়া হচ্ছে
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(500) # একটি বড় লিমিট সেট করা হয়েছে, যেমন 500। আপনার ডাটাবেসের আকার অনুযায়ী এটি পরিবর্তন করতে পারেন।
+    ).limit(1000) # লিমিট বাড়ানো হয়েছে, আপনার ডাটাবেজের আকার অনুযায়ী এটি পরিবর্তন করতে পারেন
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -498,10 +494,10 @@ async def search(_, msg: Message):
         m = await msg.reply("🔍 সরাসরি মিলে যায়নি, তবে কাছাকাছি কিছু পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
-        Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+        Google Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
-        google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
+        google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google Search_url)]
         
         reply_markup_for_no_result = InlineKeyboardMarkup([
             google_button_row,
@@ -567,7 +563,7 @@ async def callback_handler(_, cq: CallbackQuery):
         potential_lang_matches_cursor = movies_col.find(
             {"language": lang}, # শুধুমাত্র ভাষার ভিত্তিতে ফিল্টার করা হচ্ছে
             {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1}
-        ).limit(500) # এখানেও বড় লিমিট সেট করা হয়েছে
+        ).limit(1000) # এখানেও বড় লিমিট সেট করা হয়েছে
 
         potential_lang_matches = list(potential_lang_matches_cursor)
         
