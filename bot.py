@@ -90,12 +90,15 @@ async def delete_message_later(chat_id, message_id, delay=300): # ডিলে 3
         if "MESSAGE_ID_INVALID" not in str(e) and "MESSAGE_DELETE_FORBIDDEN" not in str(e):
             print(f"Error deleting message {message_id} in chat {chat_id}: {e}")
 
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, limit=5): # score_cutoff 70 থেকে 60 এ পরিবর্তন করা হয়েছে
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, limit=5): 
     if not all_movie_titles_data:
         return []
 
     choices = [item["title_clean"] for item in all_movie_titles_data]
     
+    # process.extract fuzzywuzzy ফাংশনটি দুটি স্ট্রিংয়ের মধ্যে সাদৃশ্য স্কোর গণনা করে।
+    # query_clean এর সাথে choices লিস্টের প্রতিটি আইটেমের সাদৃশ্য পরীক্ষা করে।
+    # limit প্যারামিটার সেরা n-সংখ্যক ম্যাচ ফিরিয়ে দেয়।
     matches_raw = process.extract(query_clean, choices, limit=limit)
 
     corrected_suggestions = []
@@ -107,7 +110,7 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, 
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
                         "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0) # ভিউ কাউন্ট যোগ করা হয়েছে
+                        "views_count": movie_data.get("views_count", 0)
                     })
                     break
     return corrected_suggestions
@@ -410,10 +413,13 @@ async def search(_, msg: Message):
 
     if msg.chat.type == "group":
         if len(query) < 3:
+            # গ্রুপে ছোট কোয়েরি ইগনোর করা হবে
             return
         if msg.reply_to_message or msg.from_user.is_bot:
+            # বট নিজের মেসেজ বা অন্য বটের মেসেজে রিপ্লাই দেবে না
             return
         if not re.search(r'[a-zA-Z0-9]', query):
+            # শুধুমাত্র সংখ্যা বা বিশেষ অক্ষর থাকলে ইগনোর করা হবে
             return
 
     user_id = msg.from_user.id
@@ -428,10 +434,11 @@ async def search(_, msg: Message):
 
     query_clean = clean_text(query)
     
+    # প্রথমত, সরাসরি বা কাছাকাছি regex ম্যাচ খোঁজা
     matched_movies_direct = list(movies_col.find(
         {"$or": [
-            {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}},
-            {"title": {"$regex": re.escape(query), "$options": "i"}}
+            {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}}, # সম্পূর্ণ ম্যাচ
+            {"title_clean": {"$regex": re.escape(query_clean), "$options": "i"}} # আংশিক ম্যাচ
         ]}
     ).limit(RESULTS_COUNT))
 
@@ -450,10 +457,13 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
+    # যদি সরাসরি ম্যাচ না হয়, তবে fuzzywuzzy ব্যবহার করে সম্ভাব্য কাছাকাছি ম্যাচ খোঁজা
+    # এখানে, আমরা সব মুভির ডেটা নিয়ে আসছি (বা একটি বড় অংশ) যাতে fuzzywuzzy ভালোভাবে কাজ করতে পারে।
+    # এটি `title_clean` এর উপর আর প্রাথমিক regex ফিল্টার করছে না, যা আগের সমস্যাটির মূল কারণ ছিল।
     all_movie_data_cursor = movies_col.find(
-        {"title_clean": {"$regex": query_clean, "$options": "i"}},
+        {}, # এখানে কোনো প্রাথমিক ফিল্টার নেই, সব ডেটা নেওয়া হচ্ছে
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(100)
+    ).limit(500) # একটি বড় লিমিট সেট করা হয়েছে, যেমন 500। আপনার ডাটাবেসের আকার অনুযায়ী এটি পরিবর্তন করতে পারেন।
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -462,7 +472,7 @@ async def search(_, msg: Message):
         find_corrected_matches,
         query_clean,
         all_movie_data,
-        60, # এখানেও score_cutoff 60 এ পরিবর্তন করা হয়েছে
+        60, # score_cutoff 60 এ রাখা হয়েছে
         RESULTS_COUNT
     )
 
@@ -553,10 +563,11 @@ async def callback_handler(_, cq: CallbackQuery):
     elif data.startswith("lang_"):
         _, lang, query_clean = data.split("_", 2)
         
+        # ভাষার ভিত্তিতে ফিল্টার করে fuzzywuzzy এর জন্য ডেটা তৈরি করা
         potential_lang_matches_cursor = movies_col.find(
-            {"language": lang, "title_clean": {"$regex": query_clean, "$options": "i"}},
+            {"language": lang}, # শুধুমাত্র ভাষার ভিত্তিতে ফিল্টার করা হচ্ছে
             {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1}
-        ).limit(50)
+        ).limit(500) # এখানেও বড় লিমিট সেট করা হয়েছে
 
         potential_lang_matches = list(potential_lang_matches_cursor)
         
@@ -572,7 +583,7 @@ async def callback_handler(_, cq: CallbackQuery):
             find_corrected_matches,
             query_clean,
             fuzzy_data_for_matching_lang,
-            60, # এখানেও score_cutoff 60 এ পরিবর্তন করা হয়েছে
+            60, 
             RESULTS_COUNT
         )
 
