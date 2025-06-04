@@ -1,8 +1,8 @@
-Pyrofork==2.3.45
+Pyrofork
 tgcrypto
-pymongo[srv]==4.11.1
-motor==3.7.0
-marshmallow==3.26.1
+pymongo[srv]
+motor
+marshmallow
 umongo
 requests
 bs4
@@ -11,22 +11,22 @@ shortzy
 datetime
 pytz
 aiohttp
-PyLeaves==1.0.2
+PyLeaves
 Wikipedia
-opencv-python-headless==4.8.1.78
-python-dotenv==0.21.1
+opencv-python-headless
+python-dotenv
 speedtest
-humanize==4.6.0
-Pillow==9.4.0
-psutil==5.9.4
+humanize
+Pillow
+psutil
 numpy
 wheel
 ujson
 wget
 aiofiles
-dnspython==2.3.0
+dnspython
 python-decouple
-ffmpeg-python==0.2.0
+ffmpeg-python
 jinja2
 apscheduler
 pyshorteners
@@ -35,8 +35,8 @@ colorama
 fuzzywuzzy
 python-Levenshtein
 googletrans==3.1.0a0
-telegraph==2.2.0
-gTTS==2.3.1
+telegraph
+gTTS
 imdbpy # This is the package name for cinemagoer when installed from pip, though you're installing from git.
        # If installing from git+https://github.com/Joelkb/cinemagoer, this line might not be strictly needed,
        # but it's good practice to list it for clarity or if you ever switch to a pip version.
