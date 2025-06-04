@@ -33,6 +33,7 @@ feedback_col = db["feedback"]
 stats_col = db["stats"]
 users_col = db["users"]
 settings_col = db["settings"]
+requests_col = db["requests"] # <--- নতুন: মুভি অনুরোধের জন্য কালেকশন
 
 # Indexing - Optimized for faster search
 try:
@@ -56,9 +57,7 @@ except OperationFailure as e:
 movies_col.create_index("language", background=True)
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
-# --- নতুন ইন্ডেক্স যোগ করা হয়েছে ---
-movies_col.create_index([("views_count", ASCENDING)], background=True) # জনপ্রিয় মুভির জন্য নতুন ইন্ডেক্স
-# --- নতুন ইন্ডেক্স যোগ করা হয়েছে শেষ ---
+movies_col.create_index([("views_count", ASCENDING)], background=True) # <--- নতুন ইন্ডেক্স: জনপ্রিয় মুভির জন্য
 print("All other necessary indexes ensured successfully.")
 
 # Flask App for health check
@@ -66,7 +65,6 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     return "Bot is running!"
-# 0000 সাধারণত 0.0.0.0 এর জন্য একটি প্লেসহোল্ডার, নিশ্চিত করুন আপনার এনভায়রনমেন্টে 0.0.0.0 ব্যবহার করা হয়।
 Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start() 
 
 # Initialize a global ThreadPoolExecutor for running blocking functions (like fuzzywuzzy)
@@ -126,7 +124,7 @@ async def save_post(_, msg: Message):
         "year": extract_year(text),
         "language": extract_language(text),
         "title_clean": clean_text(text),
-        "views_count": 0 # নতুন যোগ করা হয়েছে: প্রাথমিক ভিউ সংখ্যা ০
+        "views_count": 0 # <--- নতুন: প্রাথমিক ভিউ সংখ্যা ০
     }
     
     result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
@@ -170,7 +168,7 @@ async def start(_, msg: Message):
 
     users_col.update_one(
         {"_id": msg.from_user.id},
-        {"$set": {"joined": datetime.now(UTC), "notify": True}}, # datetime.utcnow() পরিবর্তন করা হয়েছে
+        {"$set": {"joined": datetime.now(UTC), "notify": True}},
         upsert=True
     )
     btns = InlineKeyboardMarkup([
@@ -186,7 +184,7 @@ async def feedback(_, msg: Message):
     feedback_col.insert_one({
         "user": msg.from_user.id,
         "text": msg.text.split(None, 1)[1],
-        "time": datetime.now(UTC) # datetime.utcnow() পরিবর্তন করা হয়েছে
+        "time": datetime.now(UTC)
     })
     m = await msg.reply("আপনার মতামতের জন্য ধন্যবাদ!")
     asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=30))
@@ -214,7 +212,8 @@ async def stats(_, msg: Message):
     await msg.reply(
         f"মোট ব্যবহারকারী: {users_col.count_documents({})}\n"
         f"মোট মুভি: {movies_col.count_documents({})}\n"
-        f"মোট ফিডব্যাক: {feedback_col.count_documents({})}"
+        f"মোট ফিডব্যাক: {feedback_col.count_documents({})}\n"
+        f"মোট অনুরোধ: {requests_col.count_documents({})}" # <--- নতুন: অনুরোধের সংখ্যা
     )
 
 @app.on_message(filters.command("notify") & filters.user(ADMIN_IDS))
@@ -282,22 +281,20 @@ async def handle_admin_reply(_, cq: CallbackQuery):
         await cq.answer("ব্যবহারকারীকে মেসেজ পাঠানো যায়নি ❌", show_alert=True)
         print(f"Error sending admin reply to user {user_id}: {e}")
 
-# --- নতুন যোগ করা ফাংশন: /popular কমান্ড ---
+# --- নতুন ফাংশন যোগ করা হয়েছে: /popular কমান্ড ---
 @app.on_message(filters.command("popular") & (filters.private | filters.group))
 async def popular_movies(_, msg: Message):
-    # views_count এর উপর ভিত্তি করে মুভিগুলো সাজান এবং LIMIT অনুযায়ী ফলাফল নিন
     popular_movies_list = list(movies_col.find(
-        {"views_count": {"$exists": True}} # views_count আছে এমন মুভিগুলো নিন
-    ).sort("views_count", -1).limit(RESULTS_COUNT)) # views_count অনুযায়ী সাজিয়ে RESULTS_COUNT সংখ্যক নিন
+        {"views_count": {"$exists": True}}
+    ).sort("views_count", -1).limit(RESULTS_COUNT))
 
     if popular_movies_list:
         buttons = []
         for movie in popular_movies_list:
-            # নিশ্চিত করুন title এবং message_id বিদ্যমান
             if "title" in movie and "message_id" in movie:
                 buttons.append([
                     InlineKeyboardButton(
-                        text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)", # টাইটেলের সাথে ভিউ সংখ্যা যোগ করুন
+                        text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)",
                         url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                     )
                 ])
@@ -308,15 +305,88 @@ async def popular_movies(_, msg: Message):
             reply_markup=reply_markup,
             quote=True
         )
-        # গ্রুপ চ্যাটের ক্ষেত্রে স্বয়ংক্রিয়ভাবে মেসেজ ডিলিট করার ব্যবস্থা
         if msg.chat.type == "group":
             asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
     else:
-        # কোনো জনপ্রিয় মুভি না পাওয়া গেলে
         m = await msg.reply_text("দুঃখিত, বর্তমানে কোনো জনপ্রিয় মুভি পাওয়া যায়নি।", quote=True)
         if msg.chat.type == "group":
             asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=60))
-# --- নতুন যোগ করা ফাংশন শেষ ---
+# --- /popular কমান্ড শেষ ---
+
+# --- নতুন ফাংশন যোগ করা হয়েছে: /request কমান্ড ---
+@app.on_message(filters.command("request") & filters.private)
+async def request_movie(_, msg: Message):
+    if len(msg.command) < 2:
+        return await msg.reply("অনুগ্রহ করে /request এর পর মুভির নাম লিখুন। উদাহরণ: `/request The Creator`", quote=True)
+    
+    movie_name = msg.text.split(None, 1)[1].strip()
+    user_id = msg.from_user.id
+    username = msg.from_user.username or msg.from_user.first_name
+
+    requests_col.insert_one({
+        "user_id": user_id,
+        "username": username,
+        "movie_name": movie_name,
+        "request_time": datetime.now(UTC),
+        "status": "pending"
+    })
+
+    m = await msg.reply(f"আপনার অনুরোধ **'{movie_name}'** সফলভাবে জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।", quote=True)
+    asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=30))
+
+    encoded_movie_name = urllib.parse.quote_plus(movie_name)
+    admin_request_btns = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ সম্পন্ন হয়েছে", callback_data=f"req_fulfilled_{user_id}_{encoded_movie_name}"),
+        InlineKeyboardButton("❌ বাতিল করা হয়েছে", callback_data=f"req_rejected_{user_id}_{encoded_movie_name}")
+    ]])
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await app.send_message(
+                admin_id,
+                f"❗ *নতুন মুভির অনুরোধ!*\n\n"
+                f"🎬 মুভির নাম: `{movie_name}`\n"
+                f"👤 ইউজার: [{username}](tg://user?id={user_id}) (`{user_id}`)",
+                reply_markup=admin_request_btns,
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            print(f"Could not notify admin {admin_id} about request: {e}")
+# --- /request কমান্ড শেষ ---
+
+# --- নতুন ফাংশন যোগ করা হয়েছে: অ্যাডমিনদের জন্য অনুরোধ কলব্যাক হ্যান্ডলার ---
+@app.on_callback_query(filters.regex(r"req_(fulfilled|rejected)_(\d+)_([^ ]+)$") & filters.user(ADMIN_IDS))
+async def handle_request_callback(_, cq: CallbackQuery):
+    parts = cq.data.split("_", 3)
+    action = parts[1]
+    user_id = int(parts[2])
+    encoded_movie_name = parts[3]
+    movie_name = urllib.parse.unquote_plus(encoded_movie_name)
+
+    requests_col.update_one(
+        {"user_id": user_id, "movie_name": movie_name, "status": "pending"},
+        {"$set": {"status": action, "admin_response_time": datetime.now(UTC)}}
+    )
+
+    user_message = ""
+    if action == "fulfilled":
+        user_message = f"✅ আপনার অনুরোধকৃত মুভি **'{movie_name}'** সম্ভবত এখন পাওয়া যাচ্ছে! অনুগ্রহ করে আবার সার্চ করে দেখুন।"
+        await cq.answer(f"অনুরোধ '{movie_name}' সম্পন্ন হিসাবে চিহ্নিত করা হয়েছে।", show_alert=True)
+    elif action == "rejected":
+        user_message = f"❌ দুঃখিত! আপনার অনুরোধকৃত মুভি **'{movie_name}'** এই মুহূর্তে সরবরাহ করা সম্ভব নয়। অনুগ্রহ করে অন্য কোনো মুভি দেখুন।"
+        await cq.answer(f"অনুরোধ '{movie_name}' বাতিল হিসাবে চিহ্নিত করা হয়েছে।", show_alert=True)
+    
+    try:
+        m_sent = await app.send_message(user_id, user_message)
+        asyncio.create_task(delete_message_later(m_sent.chat.id, m_sent.id, delay=60))
+
+        await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"✅ উত্তর দেওয়া হয়েছে: {action}", callback_data="noop")
+        ]]))
+    except Exception as e:
+        await cq.answer("ব্যবহারকারীকে মেসেজ পাঠানো যায়নি ❌", show_alert=True)
+        print(f"Error sending request fulfillment/rejection message to user {user_id}: {e}")
+# --- অনুরোধ কলব্যাক হ্যান্ডলার শেষ ---
 
 
 @app.on_message(filters.text & (filters.group | filters.private))
@@ -336,7 +406,7 @@ async def search(_, msg: Message):
     user_id = msg.from_user.id
     users_col.update_one(
         {"_id": user_id},
-        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(UTC)}}, # datetime.utcnow() পরিবর্তন করা হয়েছে
+        {"$set": {"last_query": query}, "$setOnInsert": {"joined": datetime.now(UTC)}},
         upsert=True
     )
 
@@ -403,21 +473,26 @@ async def search(_, msg: Message):
             asyncio.create_task(delete_message_later(m.chat.id, m.id, delay=120))
     else:
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
-        google_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
-        ])
         
-        # এখানে not_found_text আর্গুমেন্টটি সরানো হয়েছে এবং সরাসরি টেক্সট পাস করা হয়েছে
+        # --- এখানে নতুন রিকোয়েস্ট বাটন সহ মার্কআপ যোগ করা হয়েছে ---
+        request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
+        google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
+        
+        reply_markup_for_no_result = InlineKeyboardMarkup([
+            google_button_row,
+            [request_button]
+        ])
+        # --- পরিবর্তন শেষ ---
+
         alert = await msg.reply_text( 
             """
 ❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।
-এই মুভির অনুরোধটি এডমিনকে জানানো হয়েছে।
 
 যদি মুভির নামটি ভুল হয়ে থাকে, তাহলে আপনি নিচের বাটনে ক্লিক করে Google থেকে সঠিক নাম দেখে নিতে পারেন।
 
-📌 গুগলে সার্চ করতে নিচের বাটনে চাপুন।
+অথবা, আপনার পছন্দের মুভিটি আমাদের কাছে অনুরোধ করতে পারেন।
 """,
-            reply_markup=google_button,
+            reply_markup=reply_markup_for_no_result, # নতুন রিপ্লাই মার্কআপ ব্যবহার করা হয়েছে
             quote=True
         )
         if msg.chat.type == "group":
@@ -497,6 +572,50 @@ async def callback_handler(_, cq: CallbackQuery):
         else:
             await cq.answer("এই ভাষায় কিছু পাওয়া যায়নি।", show_alert=True)
         await cq.answer()
+
+    elif data.startswith("request_movie_"): # <--- নতুন: ইনলাইন রিকোয়েস্ট বাটন হ্যান্ডলার
+        _, user_id_str, encoded_movie_name = data.split("_", 2)
+        user_id = int(user_id_str)
+        movie_name = urllib.parse.unquote_plus(encoded_movie_name)
+        username = cq.from_user.username or cq.from_user.first_name
+
+        requests_col.insert_one({
+            "user_id": user_id,
+            "username": username,
+            "movie_name": movie_name,
+            "request_time": datetime.now(UTC),
+            "status": "pending"
+        })
+        
+        await cq.answer(f"আপনার অনুরোধ '{movie_name}' সফলভাবে জমা দেওয়া হয়েছে।", show_alert=True)
+        
+        admin_request_btns = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ সম্পন্ন হয়েছে", callback_data=f"req_fulfilled_{user_id}_{encoded_movie_name}"),
+            InlineKeyboardButton("❌ বাতিল করা হয়েছে", callback_data=f"req_rejected_{user_id}_{encoded_movie_name}")
+        ]])
+
+        for admin_id in ADMIN_IDS:
+            try:
+                await app.send_message(
+                    admin_id,
+                    f"❗ *নতুন মুভির অনুরোধ (ইনলাইন বাটন থেকে)!*\n\n"
+                    f"🎬 মুভির নাম: `{movie_name}`\n"
+                    f"👤 ইউজার: [{username}](tg://user?id={user_id}) (`{user_id}`)",
+                    reply_markup=admin_request_btns,
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                print(f"Could not notify admin {admin_id} about request from callback: {e}")
+        
+        try:
+            await cq.message.edit_text(
+                f"❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।\n\n"
+                f"আপনার অনুরোধ **'{movie_name}'** জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।",
+                reply_markup=None # বাটনগুলো সরিয়ে নেওয়া হলো
+            )
+        except Exception as e:
+            print(f"Error editing user message after request: {e}")
+
 
     elif "_" in data:
         parts = data.split("_", 3)
