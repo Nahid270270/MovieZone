@@ -571,7 +571,7 @@ async def callback_handler(_, cq: CallbackQuery):
             find_corrected_matches,
             query_clean,
             fuzzy_data_for_matching_lang,
-            70,
+            60,
             RESULTS_COUNT
         )
 
