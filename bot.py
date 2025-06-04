@@ -6,7 +6,7 @@ from flask import Flask
 from threading import Thread
 import os
 import re
-from datetime import datetime, UTC, timedelta # <-- এখানে timedelta যোগ করা হয়েছে
+from datetime import datetime, UTC, timedelta
 import asyncio
 import urllib.parse
 from fuzzywuzzy import process
@@ -90,7 +90,7 @@ async def delete_message_later(chat_id, message_id, delay=300): # ডিলে 3
         if "MESSAGE_ID_INVALID" not in str(e) and "MESSAGE_DELETE_FORBIDDEN" not in str(e):
             print(f"Error deleting message {message_id} in chat {chat_id}: {e}")
 
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, limit=5):
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, limit=5): # score_cutoff 70 থেকে 60 এ পরিবর্তন করা হয়েছে
     if not all_movie_titles_data:
         return []
 
@@ -106,7 +106,8 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                     corrected_suggestions.append({
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
-                        "language": movie_data["language"]
+                        "language": movie_data["language"],
+                        "views_count": movie_data.get("views_count", 0) # ভিউ কাউন্ট যোগ করা হয়েছে
                     })
                     break
     return corrected_suggestions
@@ -461,7 +462,7 @@ async def search(_, msg: Message):
         find_corrected_matches,
         query_clean,
         all_movie_data,
-        70,
+        60, # এখানেও score_cutoff 60 এ পরিবর্তন করা হয়েছে
         RESULTS_COUNT
     )
 
@@ -571,7 +572,7 @@ async def callback_handler(_, cq: CallbackQuery):
             find_corrected_matches,
             query_clean,
             fuzzy_data_for_matching_lang,
-            60,
+            60, # এখানেও score_cutoff 60 এ পরিবর্তন করা হয়েছে
             RESULTS_COUNT
         )
 
