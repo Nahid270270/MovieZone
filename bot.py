@@ -548,9 +548,9 @@ async def search(_, msg: Message):
                 ])
             
             # Google Search এবং Request Movie বাটন যোগ করুন
-            Google Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+            Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
             request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
-            imdb_buttons.append([InlineKeyboardButton("গুগলে সার্চ করুন", url=Google Search_url)])
+            imdb_buttons.append([InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)])
             imdb_buttons.append([request_button])
 
             m = await msg.reply_text(
