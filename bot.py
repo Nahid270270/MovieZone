@@ -69,7 +69,7 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     return "Bot is running!"
-Thread(target=lambda: flask_app.run(host="00.0.0.0", port=8080)).start()
+Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start()
 
 # Initialize a global ThreadPoolExecutor for running blocking functions (like fuzzywuzzy, IMDb operations)
 thread_pool_executor = ThreadPoolExecutor(max_workers=5)
@@ -510,27 +510,31 @@ async def search(_, msg: Message):
 
     if corrected_suggestions:
         await loading_message.delete()
-        buttons = []
+        
+        # আপনার নিজস্ব ডাটাবেস থেকে প্রাপ্ত সাজেশনগুলোকে IMDb ফলাফলের মতো দেখান
+        # এবং সেগুলোর জন্য 'start=watch_MESSAGE_ID' লিঙ্ক তৈরি করুন।
+        suggestion_buttons = []
         for movie in corrected_suggestions:
-            buttons.append([
+            suggestion_buttons.append([
                 InlineKeyboardButton(
-                    text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)",
+                    text=f"🎬 {movie['title'][:40]} ({movie.get('language', 'N/A')}, {movie.get('views_count', 0)} ভিউ)",
                     url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                 )
             ])
         
+        # ভাষা ফিল্টারের বাটনগুলো যদি রাখতে চান
         lang_buttons = [
             InlineKeyboardButton("বেঙ্গলি", callback_data=f"lang_Bengali_{query_clean}"),
             InlineKeyboardButton("হিন্দি", callback_data=f"lang_Hindi_{query_clean}"),
             InlineKeyboardButton("ইংলিশ", callback_data=f"lang_English_{query_clean}")
         ]
-        buttons.append(lang_buttons)
+        suggestion_buttons.append(lang_buttons)
 
-        m = await msg.reply("🔍 সরাসরি মিলে যায়নি, তবে কাছাকাছি কিছু পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
+        m = await msg.reply("🔍 সরাসরি মিলে যায়নি, তবে কাছাকাছি কিছু পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(suggestion_buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
         # যদি আপনার নিজস্ব DB এবং fuzzywuzzy থেকে কোনো ফলাফল না আসে,
-        # তাহলে IMDb থেকে সার্চ করার চেষ্টা করুন
+        # তবে IMDb থেকে সার্চ করার চেষ্টা করুন
         imdb_results = await search_imdb_movie(query)
 
         await loading_message.delete()
@@ -538,14 +542,15 @@ async def search(_, msg: Message):
         if imdb_results:
             imdb_buttons = []
             for res in imdb_results:
+                # IMDb ফলাফলের জন্য IMDb URL থাকবে
                 imdb_buttons.append([
                     InlineKeyboardButton(text=res["text"].splitlines()[0], url=res["imdb_url"])
                 ])
             
             # Google Search এবং Request Movie বাটন যোগ করুন
-            Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+            Google Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
             request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
-            imdb_buttons.append([InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)])
+            imdb_buttons.append([InlineKeyboardButton("গুগলে সার্চ করুন", url=Google Search_url)])
             imdb_buttons.append([request_button])
 
             m = await msg.reply_text(
