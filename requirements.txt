@@ -1,44 +1,6 @@
-Pyrofork
-tgcrypto
-pymongo[srv]
-motor
+pyrogram
+pymongo
 Flask
-marshmallow
-umongo
-requests
-bs4
-git+https://github.com/Joelkb/cinemagoer
-shortzy
-datetime
-pytz
-aiohttp
-PyLeaves
-Wikipedia
-opencv-python-headless
-python-dotenv
-speedtest
-humanize
-Pillow
-psutil
-numpy
-wheel
-ujson
-wget
-aiofiles
-dnspython
-python-decouple
-ffmpeg-python
-jinja2
-apscheduler
-pyshorteners
-pyromod
-colorama
 fuzzywuzzy
-python-Levenshtein
-googletrans==3.1.0a0
-telegraph
-gTTS
-imdbpy # This is the package name for cinemagoer when installed from pip, though you're installing from git.
-       # If installing from git+https://github.com/Joelkb/cinemagoer, this line might not be strictly needed,
-       # but it's good practice to list it for clarity or if you ever switch to a pip version.
-       # For clarity, I'm keeping the git+https line as per your original.
+python-Levenshtein # fuzzywuzzy এর জন্য এটি ইনস্টল করা হলে পারফরম্যান্স উন্নত হয়
+cinemagoer # আগে এটি imdb নামে পরিচিত ছিল, এখন Cinemagoer লাইব্রেরি
