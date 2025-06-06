@@ -1,7 +1,7 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pymongo import MongoClient, ASCENDING
-from pymongo.errors import OperationFailure, CollectionInvalid, DuplicateKeyError
+from pymongo.errors import OperationFailure, DuplicateKeyError
 from flask import Flask
 from threading import Thread
 import os
@@ -11,6 +11,7 @@ import asyncio
 import urllib.parse
 from fuzzywuzzy import process
 from concurrent.futures import ThreadPoolExecutor
+import logging # লগিং মডিউল যোগ করা হয়েছে
 
 # --- Configs ---
 # নিশ্চিত করুন এই ভেরিয়েবলগুলো আপনার এনভায়রনমেন্টে সেট করা আছে।
@@ -24,6 +25,11 @@ ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial") # আপনার আপডেট চ্যানেলের লিঙ্ক
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg") # স্টার্ট মেসেজের ছবির লিঙ্ক
+
+# --- Configure logging ---
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- Pyrogram Client Initialization ---
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -42,22 +48,21 @@ requests_col = db["requests"]
 try:
     # Ensure unique index on message_id
     movies_col.create_index("message_id", unique=True, background=True)
-    print("Index 'message_id' (unique) ensured successfully.")
+    logger.info("Index 'message_id' (unique) ensured successfully.")
 except DuplicateKeyError as e:
-    print(f"Warning: Cannot create unique index on 'message_id' due to duplicate entries. "
-          f"Please clean your database manually if this persists. Error: {e}")
+    logger.warning(f"Warning: Cannot create unique index on 'message_id' due to duplicate entries. "
+                   f"Please clean your database manually if this persists. Error: {e}")
 except OperationFailure as e:
-    print(f"Error creating index 'message_id': {e}")
-    # Handle specific errors if needed, e.g., if index already exists with different options
+    logger.error(f"Error creating index 'message_id': {e}")
     if "index already exists" in str(e):
-        print("Index 'message_id' already exists, skipping creation.")
+        logger.info("Index 'message_id' already exists, skipping creation.")
 
 # Other indexes
 movies_col.create_index("language", background=True)
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("views_count", ASCENDING)], background=True)
-print("All other necessary indexes ensured successfully.")
+logger.info("All other necessary indexes ensured successfully.")
 
 # --- Flask App for Health Check ---
 flask_app = Flask(__name__)
@@ -88,7 +93,7 @@ async def delete_message_later(chat_id, message_id, delay=300): # Default delay 
         await app.delete_messages(chat_id, message_id)
     except Exception as e:
         if "MESSAGE_ID_INVALID" not in str(e) and "MESSAGE_DELETE_FORBIDDEN" not in str(e) and "MESSAGE_NOT_FOUND" not in str(e):
-            print(f"Error deleting message {message_id} in chat {chat_id}: {e}")
+            logger.error(f"Error deleting message {message_id} in chat {chat_id}: {e}")
 
 def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, limit=5):
     if not all_movie_titles_data:
@@ -107,7 +112,7 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
                         "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0) # Add views count for display
+                        "views_count": movie_data.get("views_count", 0)
                     })
                     break
     return corrected_suggestions
@@ -119,12 +124,11 @@ user_last_start_time = {}
 
 @app.on_message(filters.chat(CHANNEL_ID))
 async def save_post(_, msg: Message):
-    # ডিবাগ: চেক করুন save_post ট্রিগার হচ্ছে কিনা
-    print(f"DEBUG: save_post function triggered for message ID: {msg.id}")
+    logger.info(f"save_post function triggered for message ID: {msg.id} in channel {CHANNEL_ID}")
     
     text = msg.text or msg.caption
     if not text:
-        print("DEBUG: Message has no text or caption, skipping save_post.")
+        logger.warning("Message has no text or caption, skipping save_post.")
         return
 
     movie_to_save = {
@@ -140,46 +144,60 @@ async def save_post(_, msg: Message):
         "rated_by": []
     }
     
-    result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
-    # ডিবাগ: ডাটাবেস আপডেটের ফলাফল
-    print(f"DEBUG: Database update result for message {msg.id}: upserted_id={result.upserted_id}, matched_count={result.matched_count}, modified_count={result.modified_count}")
+    try:
+        result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
+        logger.info(f"Database update result for message {msg.id}: upserted_id={result.upserted_id}, matched_count={result.matched_count}, modified_count={result.modified_count}")
+    except Exception as e:
+        logger.error(f"Error saving movie to database for message {msg.id}: {e}")
+        return # ডাটাবেস সেভ না হলে নোটিফিকেশন পাঠানোর দরকার নেই
 
-    if result.upserted_id is not None:
+    if result.upserted_id is not None: # Only send notification if it's a new movie (first time seen)
         setting = settings_col.find_one({"key": "global_notify"})
-        # ডিবাগ: গ্লোবাল নোটিফিকেশন সেটিংস চেক করুন
-        print(f"DEBUG: Global notify setting: {setting}")
+        global_notify_enabled = setting and setting.get("value")
+        logger.info(f"Global notify setting: {global_notify_enabled}")
         
-        if setting and setting.get("value"):
-            print("DEBUG: Global notify is ON, proceeding with user notifications.")
-            for user in users_col.find({"notify": {"$ne": False}}):
+        if global_notify_enabled:
+            logger.info("Global notify is ON. Attempting to send notifications to users.")
+            users_notified_count = 0
+            users_skipped_count = 0
+            
+            # Find users who want notifications (notify is not False)
+            notifiable_users = users_col.find({"notify": {"$ne": False}})
+            
+            for user in notifiable_users:
                 try:
-                    movie_title_for_notification = text.splitlines()[0][:100]
-                    # ব্যবহারকারীর সুবিধার জন্য, নোটিফিকেশনে মুভির নামটি ক্লিকযোগ্য করে কপি করার জন্য `code block` ব্যবহার করা হয়েছে।
+                    movie_title_for_notification = text.splitlines()[0][:100] # প্রথম লাইন এবং 100 অক্ষর পর্যন্ত
                     notification_text = (
                         f"নতুন মুভি আপলোড হয়েছে:\n`{movie_title_for_notification}`\nএখনই সার্চ করে দেখুন!"
                     )
                     m = await app.send_message(
                         user["_id"],
                         notification_text,
-                        parse_mode="Markdown" # Markdown অথবা MarkdownV2 ব্যবহার করুন
+                        parse_mode="Markdown"
                     )
                     asyncio.create_task(delete_message_later(m.chat.id, m.id))
+                    users_notified_count += 1
                     await asyncio.sleep(0.05) # Flood wait এড়াতে ছোট ডিলে
                 except Exception as e:
-                    # ডিবাগ: নোটিফিকেশন পাঠানোর ত্রুটি
-                    print(f"DEBUG: Failed to send notification to user {user['_id']}: {e}")
+                    logger.error(f"Failed to send notification to user {user['_id']}: {e}")
+                    users_skipped_count += 1
+                    # Pyrogram এর ত্রুটি হ্যান্ডলিং আরও সুনির্দিষ্ট করা হয়েছে
                     if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e):
-                        print(f"DEBUG: Skipping notification to invalid/blocked user {user['_id']}. Considering removal.")
-                        # চাইলে এখানে ইউজারকে ডাটাবেস থেকে সরিয়ে দিতে পারেন
-                        # users_col.delete_one({"_id": user["_id"]})
+                        logger.warning(f"User {user['_id']} is invalid/blocked/deactivated. Considering marking as notifiable=False or removal.")
+                        # চাইলে এখানে ইউজারের `notify` স্টেটাস `False` করে দিতে পারেন যাতে ভবিষ্যতে আর চেষ্টা না করে।
+                        # users_col.update_one({"_id": user["_id"]}, {"$set": {"notify": False}})
                     elif "FloodWait" in str(e):
-                        wait_time = int(re.search(r"(\d+)s", str(e)).group(1)) + 5 # কিছু অতিরিক্ত সময়
-                        print(f"DEBUG: Hit FloodWait. Sleeping for {wait_time} seconds.")
+                        wait_time_match = re.search(r"(\d+)s", str(e))
+                        wait_time = int(wait_time_match.group(1)) + 5 if wait_time_match else 10 # Default to 10 if regex fails
+                        logger.warning(f"Hit FloodWait. Sleeping for {wait_time} seconds.")
                         await asyncio.sleep(wait_time)
                     else:
-                        print(f"DEBUG: Unhandled error sending notification to user {user['_id']}: {e}")
+                        logger.error(f"Unhandled error sending notification to user {user['_id']}: {e}")
+            logger.info(f"Notification attempt completed. Notified {users_notified_count} users, skipped {users_skipped_count} users.")
         else:
-            print("DEBUG: Global notify is OFF or not found, skipping user notifications.")
+            logger.info("Global notify is OFF or not found, skipping user notifications.")
+    else:
+        logger.info(f"Movie {msg.id} already exists in DB or was not upserted, skipping notification.")
 
 
 @app.on_message(filters.command("start"))
@@ -191,7 +209,7 @@ async def start(_, msg: Message):
     if user_id in user_last_start_time:
         time_since_last_start = current_time - user_last_start_time[user_id]
         if time_since_last_start < timedelta(seconds=5):
-            print(f"DEBUG: User {user_id} sent /start too quickly. Ignoring.")
+            logger.info(f"User {user_id} sent /start too quickly. Ignoring.")
             return
 
     user_last_start_time[user_id] = current_time
@@ -199,12 +217,11 @@ async def start(_, msg: Message):
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         try:
-            # `app.forward_messages` এর পরিবর্তে `app.copy_message` ব্যবহার করা হয়েছে
             copied_message = await app.copy_message(
-                chat_id=msg.chat.id,        # যেখানে মেসেজটি পাঠানো হবে (ইউজারের চ্যাট)
-                from_chat_id=CHANNEL_ID,    # যেখান থেকে মেসেজটি কপি করা হবে (আপনার চ্যানেল)
-                message_id=message_id,      # মূল মেসেজের আইডি
-                protect_content=True        # কন্টেন্ট সুরক্ষা নিশ্চিত করতে
+                chat_id=msg.chat.id,
+                from_chat_id=CHANNEL_ID,
+                message_id=message_id,
+                protect_content=True
             )
             
             movie_data = movies_col.find_one({"message_id": message_id})
@@ -222,10 +239,10 @@ async def start(_, msg: Message):
                     chat_id=msg.chat.id,
                     text="মুভিটি কেমন লাগলো? রেটিং দিন:",
                     reply_markup=rating_buttons,
-                    reply_to_message_id=copied_message.id # কপি করা মেসেজের আইডি ব্যবহার করা হয়েছে
+                    reply_to_message_id=copied_message.id
                 )
                 asyncio.create_task(delete_message_later(rating_message.chat.id, rating_message.id))
-                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id)) # কপি করা মেসেজ ডিলিট করুন
+                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
 
             movies_col.update_one(
                 {"message_id": message_id},
@@ -235,7 +252,7 @@ async def start(_, msg: Message):
         except Exception as e:
             error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা লোড করা যায়নি।")
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-            print(f"Error copying message from start payload: {e}")
+            logger.error(f"Error copying message from start payload: {e}")
         return
 
     users_col.update_one(
@@ -272,16 +289,24 @@ async def broadcast(_, msg: Message):
         return
     count = 0
     message_to_send = msg.text.split(None, 1)[1]
-    for user in users_col.find():
+    all_users = users_col.find({})
+    for user in all_users:
         try:
             await app.send_message(user["_id"], message_to_send)
             count += 1
             await asyncio.sleep(0.05)
         except Exception as e:
+            logger.error(f"Failed to broadcast to user {user['_id']}: {e}")
             if "PEER_ID_INVALID" in str(e) or "USER_IS_BLOCKED" in str(e) or "USER_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
-                print(f"Skipping broadcast to invalid/blocked user {user['_id']}: {e}")
+                logger.warning(f"Skipping broadcast to invalid/blocked user {user['_id']}. Removing from user collection.")
+                users_col.delete_one({"_id": user["_id"]}) # Invalid users can be removed
+            elif "FloodWait" in str(e):
+                wait_time_match = re.search(r"(\d+)s", str(e))
+                wait_time = int(wait_time_match.group(1)) + 5 if wait_time_match else 10
+                logger.warning(f"Broadcast hit FloodWait. Sleeping for {wait_time} seconds.")
+                await asyncio.sleep(wait_time)
             else:
-                print(f"Failed to broadcast to user {user['_id']}: {e}")
+                logger.error(f"Unhandled error during broadcast to user {user['_id']}: {e}")
     reply_msg = await msg.reply(f"{count} জন ব্যবহারকারীর কাছে ব্রডকাস্ট পাঠানো হয়েছে।")
     asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
 
@@ -367,7 +392,7 @@ async def handle_admin_reply(_, cq: CallbackQuery):
         ]]))
     except Exception as e:
         await cq.answer("ব্যবহারকারীকে মেসেজ পাঠানো যায়নি ❌", show_alert=True)
-        print(f"Error sending admin reply to user {user_id}: {e}")
+        logger.error(f"Error sending admin reply to user {user_id}: {e}")
 
 @app.on_message(filters.command("popular") & (filters.private | filters.group))
 async def popular_movies(_, msg: Message):
@@ -436,7 +461,7 @@ async def request_movie(_, msg: Message):
                 disable_web_page_preview=True
             )
         except Exception as e:
-            print(f"Could not notify admin {admin_id} about request: {e}")
+            logger.error(f"Could not notify admin {admin_id} about request: {e}")
 
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
@@ -490,7 +515,7 @@ async def search(_, msg: Message):
     all_movie_data_cursor = movies_col.find(
         {"title_clean": {"$regex": query_clean, "$options": "i"}},
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(100) # Limit initial fetch for performance
+    ).limit(100)
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -562,14 +587,14 @@ async def search(_, msg: Message):
                 await app.send_message(
                     admin_id,
                     f"❗ *নতুন মুভি খোঁজা হয়েছে কিন্তু পাওয়া যায়নি!*\n\n"
-                    f"🔍 অনুসন্ধান: `{query}`\n" # অ্যাডমিন নোটিফিকেশনে মুভির নাম ক্লিক করে কপি করার জন্য
+                    f"🔍 অনুসন্ধান: `{query}`\n"
                     f"👤 ইউজার: [{msg.from_user.first_name}](tg://user?id={user_id}) (`{user_id}`)",
                     reply_markup=admin_btns,
-                    parse_mode="Markdown", # Markdown ফরম্যাট অবশ্যই ব্যবহার করতে হবে
+                    parse_mode="Markdown",
                     disable_web_page_preview=True
                 )
             except Exception as e:
-                print(f"Could not notify admin {admin_id}: {e}")
+                logger.error(f"Could not notify admin {admin_id}: {e}")
 
 # --- Callback Query Handler ---
 @app.on_callback_query()
@@ -660,17 +685,17 @@ async def callback_handler(_, cq: CallbackQuery):
                     disable_web_page_preview=True
                 )
             except Exception as e:
-                print(f"Could not notify admin {admin_id} about request from callback: {e}")
+                logger.error(f"Could not notify admin {admin_id} about request from callback: {e}")
         
         try:
             edited_msg = await cq.message.edit_text(
                 f"❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।\n\n"
                 f"আপনার অনুরোধ **'{movie_name}'** জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।",
-                reply_markup=None # বাটন সরিয়ে দেওয়া হয়েছে
+                reply_markup=None
             )
             asyncio.create_task(delete_message_later(edited_msg.chat.id, edited_msg.id))
         except Exception as e:
-            print(f"Error editing user message after request: {e}")
+            logger.error(f"Error editing user message after request: {e}")
 
     elif data.startswith("like_") or data.startswith("dislike_"):
         action, message_id_str, user_id_str = data.split("_", 2)
@@ -710,7 +735,7 @@ async def callback_handler(_, cq: CallbackQuery):
             await cq.message.edit_reply_markup(reply_markup=new_rating_buttons)
             await cq.answer("আপনার রেটিং রেকর্ড করা হয়েছে! ধন্যবাদ।", show_alert=True)
         except Exception as e:
-            print(f"Error editing message after rating: {e}")
+            logger.error(f"Error editing message after rating: {e}")
             await cq.answer("রেটিং আপডেট করতে সমস্যা হয়েছে।", show_alert=True)
 
     elif "_" in data:
@@ -731,7 +756,7 @@ async def callback_handler(_, cq: CallbackQuery):
                     await cq.answer("অ্যাডমিনের পক্ষ থেকে উত্তর পাঠানো হয়েছে।")
                 except Exception as e:
                     await cq.answer("ইউজারকে বার্তা পাঠাতে সমস্যা হয়েছে।", show_alert=True)
-                    print(f"Error sending admin feedback message: {e}")
+                    logger.error(f"Error sending admin feedback message: {e}")
             else:
                 await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
         else:
@@ -739,7 +764,6 @@ async def callback_handler(_, cq: CallbackQuery):
 
 # --- Main Bot Run ---
 if __name__ == "__main__":
-    # ডিবাগ: বট শুরু হওয়ার আগে লোড করা চ্যানেল আইডি প্রিন্ট করুন
-    print(f"DEBUG: Loaded CHANNEL_ID for filters: {CHANNEL_ID}")
-    print("বট শুরু হচ্ছে...")
+    logger.info(f"Loaded CHANNEL_ID for filters: {CHANNEL_ID}")
+    logger.info("বট শুরু হচ্ছে...")
     app.run()
