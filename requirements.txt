@@ -2,5 +2,5 @@ pyrogram
 pymongo
 Flask
 fuzzywuzzy
-python-Levenshtein # fuzzywuzzy এর জন্য এটি ইনস্টল করা হলে পারফরম্যান্স উন্নত হয়
-cinemagoer # আগে এটি imdb নামে পরিচিত ছিল, এখন Cinemagoer লাইব্রেরি
+python-Levenshtein
+tgcrypto
