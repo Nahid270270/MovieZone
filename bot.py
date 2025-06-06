@@ -140,9 +140,15 @@ async def save_post(_, msg: Message):
         if setting and setting.get("value"):
             for user in users_col.find({"notify": {"$ne": False}}):
                 try:
+                    movie_title_for_notification = text.splitlines()[0][:100]
+                    # ব্যবহারকারীর সুবিধার জন্য, নোটিফিকেশনে মুভির নামটি ক্লিকযোগ্য করে কপি করার জন্য `code block` ব্যবহার করা হয়েছে।
+                    notification_text = (
+                        f"নতুন মুভি আপলোড হয়েছে:\n`{movie_title_for_notification}`\nএখনই সার্চ করে দেখুন!"
+                    )
                     m = await app.send_message(
                         user["_id"],
-                        f"নতুন মুভি আপলোড হয়েছে:\n**{text.splitlines()[0][:100]}**\nএখনই সার্চ করে দেখুন!"
+                        notification_text,
+                        parse_mode="Markdown" # Markdown অথবা MarkdownV2 ব্যবহার করুন
                     )
                     asyncio.create_task(delete_message_later(m.chat.id, m.id))
                     await asyncio.sleep(0.05)
@@ -530,9 +536,10 @@ async def search(_, msg: Message):
                 await app.send_message(
                     admin_id,
                     f"❗ *নতুন মুভি খোঁজা হয়েছে কিন্তু পাওয়া যায়নি!*\n\n"
-                    f"🔍 অনুসন্ধান: `{query}`\n"
+                    f"🔍 অনুসন্ধান: `{query}`\n" # মুভির নাম ব্যাকটিক্স দিয়ে এনক্লোজ করা হয়েছে
                     f"👤 ইউজার: [{msg.from_user.first_name}](tg://user?id={user_id}) (`{user_id}`)",
                     reply_markup=admin_btns,
+                    parse_mode="Markdown", # Markdown ফরম্যাট অবশ্যই ব্যবহার করতে হবে
                     disable_web_page_preview=True
                 )
             except Exception as e:
