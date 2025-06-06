@@ -493,10 +493,10 @@ async def search(_, msg: Message):
         m = await msg.reply("🔍 সরাসরি মিলে যায়নি, তবে কাছাকাছি কিছু পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
-        Google Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
+        Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
-        google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google Search_url)]
+        google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
         
         reply_markup_for_no_result = InlineKeyboardMarkup([
             google_button_row,
