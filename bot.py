@@ -168,12 +168,12 @@ async def start(_, msg: Message):
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         try:
-            # এখানে protect_content=True যোগ করা হয়েছে
-            fwd = await app.forward_messages(
-                chat_id=msg.chat.id,
-                from_chat_id=CHANNEL_ID,
-                message_ids=message_id,
-                protect_content=True # <-- এই লাইনটি যোগ করা হয়েছে
+            # app.forward_messages এর পরিবর্তে app.copy_message ব্যবহার করা হয়েছে
+            copied_message = await app.copy_message(
+                chat_id=msg.chat.id,        # যেখানে মেসেজটি পাঠানো হবে (ইউজারের চ্যাট)
+                from_chat_id=CHANNEL_ID,    # যেখান থেকে মেসেজটি কপি করা হবে (আপনার চ্যানেল)
+                message_id=message_id,      # মূল মেসেজের আইডি
+                protect_content=True        # কন্টেন্ট সুরক্ষা নিশ্চিত করতে
             )
             
             movie_data = movies_col.find_one({"message_id": message_id})
@@ -191,10 +191,10 @@ async def start(_, msg: Message):
                     chat_id=msg.chat.id,
                     text="মুভিটি কেমন লাগলো? রেটিং দিন:",
                     reply_markup=rating_buttons,
-                    reply_to_message_id=fwd.id
+                    reply_to_message_id=copied_message.id # কপি করা মেসেজের আইডি ব্যবহার করা হয়েছে
                 )
                 asyncio.create_task(delete_message_later(rating_message.chat.id, rating_message.id))
-                asyncio.create_task(delete_message_later(fwd.chat.id, fwd.id))
+                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id)) # কপি করা মেসেজ ডিলিট করুন
 
             movies_col.update_one(
                 {"message_id": message_id},
@@ -202,9 +202,9 @@ async def start(_, msg: Message):
             )
 
         except Exception as e:
-            error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা ফরওয়ার্ড করা যায়নি।")
+            error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা লোড করা যায়নি।")
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-            print(f"Error forwarding message from start payload: {e}")
+            print(f"Error copying message from start payload: {e}")
         return
 
     users_col.update_one(
