@@ -76,12 +76,16 @@ def clean_text(text):
     return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
 
 def extract_language(text):
-    # এই ফাংশনটি এখন শুধু মূল ভাষার নাম খুঁজে বের করবে, "movie" বা অন্য কিছু যোগ করবে না।
-    # এটি নিশ্চিত করবে যে ডাটাবেসে 'Bengali', 'Hindi', 'English' সেভ হচ্ছে।
-    if "bengali" in text.lower(): return "Bengali"
-    if "hindi" in text.lower(): return "Hindi"
-    if "english" in text.lower(): return "English"
-    return None
+    # ভাষার নাম সনাক্তকরণের জন্য আরও শক্তিশালী লজিক
+    text_lower = text.lower()
+    if "bengali" in text_lower or "বাংলা" in text_lower or "বেঙ্গলি" in text_lower:
+        return "Bengali"
+    if "hindi" in text_lower or "হিন্দি" in text_lower:
+        return "Hindi"
+    if "english" in text_lower:
+        return "English"
+    # যদি কোনো ভাষা সনাক্ত না হয়, তাহলে "Others" হিসেবে সেভ করা
+    return "Others"
 
 def extract_year(text):
     match = re.search(r'\b(19|20)\d{2}\b', text)
@@ -104,8 +108,6 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=55, 
     # যদি query_clean খালি হয়, তাহলে fuzzywuzzy ব্যবহার করা সম্ভব নয়
     if not query_clean.strip():
         print("DEBUG: find_corrected_matches - query_clean is empty, cannot perform fuzzy matching.")
-        # এই ক্ষেত্রে, আমরা শুধুমাত্র ভাষার উপর ভিত্তি করে প্রথম কয়েকটি মুভি ফেরত দিতে পারি,
-        # অথবা একটি খালি তালিকা ফেরত দিতে পারি। এখানে খালি তালিকা ফেরত দেওয়া হলো।
         return [] 
 
     choices = [item["title_clean"] for item in all_movie_titles_data]
@@ -433,8 +435,6 @@ async def search(_, msg: Message):
 
     if not query:
         print("DEBUG: Search - Query is empty or only whitespace. Returning.")
-        # এখানে কোনো মেসেজ না পাঠিয়ে শুধু রিটার্ন করা হলো।
-        # কারণ ফাঁকা ক্যোয়ারি দিয়ে সার্চ করার চেষ্টা করাটা অর্থহীন।
         return 
 
     if msg.chat.type == "group":
@@ -550,7 +550,10 @@ async def search(_, msg: Message):
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
         
-        encoded_query_clean_for_callback = urllib.parse.quote_plus(query_clean)
+        # যদি query_clean খালি হয়, তাহলেও ভাষার বাটনগুলো যাতে কাজ করে তার জন্য query_clean এর জায়গায় একটি ফাঁকা স্ট্রিং পাঠানো হচ্ছে
+        # কিন্তু, যেহেতু এই ক্ষেত্রে কোনো সার্চ ক্যোয়ারি নেই, তাই ক্যোয়ারি না থাকলে শুধু ভাষার মুভি দেখানোর লজিক কাজ করবে।
+        encoded_query_clean_for_callback = urllib.parse.quote_plus(query_clean) if query_clean else urllib.parse.quote_plus("")
+
         lang_buttons_no_result = [
             InlineKeyboardButton("বেঙ্গলি মুভি দেখুন", callback_data=f"filter_lang_Bengali_{encoded_query_clean_for_callback}"),
             InlineKeyboardButton("হিন্দি মুভি দেখুন", callback_data=f"filter_lang_Hindi_{encoded_query_clean_for_callback}"),
@@ -629,75 +632,37 @@ async def callback_handler(_, cq: CallbackQuery):
 
         print(f"DEBUG: Callback - filter_lang_ - lang: '{lang}', query_clean: '{query_clean}'") 
         
-        # যদি query_clean খালি থাকে, তাহলে শুধুমাত্র ভাষার উপর ভিত্তি করে মুভি দেখানো
-        if not query_clean.strip():
-            print(f"DEBUG: Callback - query_clean is empty for language filter '{lang}'. Fetching movies by language only.")
-            # এখানে শুধু ভাষার উপর ভিত্তি করে মুভি খুঁজে বের করা হচ্ছে
-            lang_regex = re.compile(f".*{re.escape(lang)}.*", re.IGNORECASE)
-            
-            # সরাসরি ভাষার উপর ভিত্তি করে মুভি খোঁজা, কোনো fuzzywuzzy ছাড়া
-            movies_by_lang_only = list(movies_col.find(
-                {"language": {"$regex": lang_regex}},
-                {"title": 1, "message_id": 1, "views_count": 1}
-            ).sort("views_count", -1).limit(RESULTS_COUNT)) # জনপ্রিয়তার ভিত্তিতে সর্ট করে দেখানো
-
-            if movies_by_lang_only:
-                buttons = []
-                for m in movies_by_lang_only:
-                    buttons.append([InlineKeyboardButton(f"{m['title'][:40]} ({m.get('views_count',0)} ভিউ)", url=f"https://t.me/{app.me.username}?start=watch_{m['message_id']}")])
-                
-                try:
-                    reply_msg = await cq.message.edit_text(
-                        f"ফলাফল ({lang} মুভি) - নিচের থেকে সিলেক্ট করুন:",
-                        reply_markup=InlineKeyboardMarkup(buttons)
-                    )
-                    asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
-                    print(f"DEBUG: Sent {len(movies_by_lang_only)} language-only results for '{lang}'.")
-                except Exception as e:
-                    print(f"ERROR: Error editing message for language-only filter: {e}")
-                    await cq.answer("ফলাফল দেখানোর সময় সমস্যা হয়েছে।", show_alert=True)
-            else:
-                await cq.answer(f"দুঃখিত, '{lang}' ভাষায় কোনো মুভি পাওয়া যায়নি।", show_alert=True)
-                print(f"DEBUG: No language-only results found for '{lang}'.")
-            await cq.answer()
-            return # এখানে রিটার্ন করা হলো কারণ fuzzy matching এর প্রয়োজন নেই
-
-
-        # ভাষা এবং পরিষ্কার করা সার্চ টার্ম দিয়ে মুভি খোঁজা (যদি query_clean থাকে)
-        lang_regex = re.compile(f".*{re.escape(lang)}.*", re.IGNORECASE)
+        # ভাষার উপর ভিত্তি করে মুভি খোঁজা
+        lang_regex = re.compile(f"^{re.escape(lang)}$", re.IGNORECASE) # Exact match for language
+        
+        # যদি query_clean খালি থাকে, অথবা এটি 'Others' হয় (যেমন যখন কোনো সার্চ রেজাল্ট পাওয়া যায়নি)
+        # তখন শুধুমাত্র ভাষার উপর ভিত্তি করে মুভি দেখানো হবে।
+        # যদি query_clean থাকে, তাহলে ভাষা ও সার্চ ক্যোয়ারি উভয় দিয়েই ফিল্টার করা হবে।
+        
+        filter_criteria = {"language": {"$regex": lang_regex}}
+        if query_clean.strip():
+            filter_criteria["$or"] = [
+                {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}},
+                {"title_clean": {"$regex": re.escape(query_clean), "$options": "i"}} # for partial matches
+            ]
 
         potential_lang_matches_cursor = movies_col.find(
-            {"language": {"$regex": lang_regex}}, 
+            filter_criteria, 
             {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1, "language": 1}
-        ).limit(2000) # LIMIT বাড়িয়ে 2000 করা হলো
+        ).sort("views_count", -1).limit(RESULTS_COUNT) # জনপ্রিয়তার ভিত্তিতে সর্ট করা
 
-        potential_lang_matches = list(potential_lang_matches_cursor)
-        print(f"DEBUG: Filtered {len(potential_lang_matches)} movies by language '{lang}' before fuzzy matching for query '{query_clean}'.")
+        matches_filtered_by_lang = list(potential_lang_matches_cursor)
         
-        fuzzy_data_for_matching_lang = [
-            {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"], 
-             "language": m.get("language", ""), "views_count": m.get("views_count", 0)} 
-            for m in potential_lang_matches
-        ]
+        print(f"DEBUG: Filtered {len(matches_filtered_by_lang)} movies by language '{lang}' with query '{query_clean}'.")
         
-        loop = asyncio.get_running_loop()
-        matches_filtered_by_lang = await loop.run_in_executor(
-            thread_pool_executor,
-            find_corrected_matches,
-            query_clean, 
-            fuzzy_data_for_matching_lang, 
-            55, # স্কোর কাটঅফ 55 এ কমানো হয়েছে
-            RESULTS_COUNT
-        )
-
         if matches_filtered_by_lang:
             buttons = []
-            for m in matches_filtered_by_lang[:RESULTS_COUNT]:
+            for m in matches_filtered_by_lang: # ফলাফলের সংখ্যা RESULTS_COUNT দ্বারা সীমিত
                 buttons.append([InlineKeyboardButton(f"{m['title'][:40]} ({m.get('views_count',0)} ভিউ)", url=f"https://t.me/{app.me.username}?start=watch_{m['message_id']}")])
             
             try:
                 reply_msg = await cq.message.edit_text(
-                    f"ফলাফল ({lang} মুভি) - নিচের থেকে সিলেক্ট করুন:",
+                    f"ফলাফল ({lang} মুভি):",
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
                 asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
@@ -706,7 +671,7 @@ async def callback_handler(_, cq: CallbackQuery):
                 print(f"ERROR: Error editing message after language filter for '{query_clean}' (Lang: {lang}): {e}")
                 await cq.answer("ফলাফল দেখানোর সময় সমস্যা হয়েছে।", show_alert=True)
         else:
-            await cq.answer(f"দুঃখিত, '{lang}' ভাষায় '{urllib.parse.unquote_plus(encoded_query_clean)}' এর জন্য কোনো মুভি পাওয়া যায়নি।", show_alert=True)
+            await cq.answer(f"দুঃখিত, '{lang}' ভাষায় আপনার অনুসন্ধানের জন্য কোনো মুভি পাওয়া যায়নি।", show_alert=True)
             print(f"DEBUG: No language-filtered results found for '{query_clean}' (Lang: {lang}).")
         await cq.answer() 
 
@@ -867,3 +832,4 @@ async def callback_handler(_, cq: CallbackQuery):
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
     app.run()
+
