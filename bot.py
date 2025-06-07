@@ -54,9 +54,6 @@ except DuplicateKeyError as e:
 except OperationFailure as e:
     print(f"Error creating index 'message_id': {e}")
 
-# এখানে language ফিল্ডে regex search করার জন্য আলাদা ইন্ডেক্স খুব একটা কার্যকর হবে না,
-# কারণ regex startsWith বা exact match না হলে ইন্ডেক্স পুরোপুরি ব্যবহার করতে পারে না।
-# তবুও, এটি রাখা হলো যদি ভবিষ্যতে exact match এর প্রয়োজন হয়।
 movies_col.create_index("language", background=True) 
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
@@ -75,6 +72,7 @@ thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # Helpers
 def clean_text(text):
+    # শুধু বর্ণমালা ও সংখ্যা রেখে অন্য সব ক্যারেক্টার বাদ দেওয়া এবং লোয়ারকেস করা
     return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
 
 def extract_language(text):
@@ -97,13 +95,16 @@ async def delete_message_later(chat_id, message_id, delay=60): # ডিলে 60
         if "MESSAGE_ID_INVALID" not in str(e) and "MESSAGE_DELETE_FORBIDDEN" not in str(e):
             print(f"Error deleting message {message_id} in chat {chat_id}: {e}")
 
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, limit=10): # স্কোর কাটঅফ 60 এ কমানো হয়েছে
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=55, limit=10): # স্কোর কাটঅফ 55 এ কমানো হয়েছে
+    print(f"DEBUG: find_corrected_matches - Query: '{query_clean}', Total choices: {len(all_movie_titles_data)}")
     if not all_movie_titles_data:
+        print("DEBUG: find_corrected_matches - No movie data provided.")
         return []
 
     choices = [item["title_clean"] for item in all_movie_titles_data]
     
     matches_raw = process.extract(query_clean, choices, limit=limit)
+    print(f"DEBUG: find_corrected_matches - Raw matches: {matches_raw}")
 
     corrected_suggestions = []
     for matched_clean_title, score in matches_raw:
@@ -117,6 +118,7 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, 
                         "views_count": movie_data.get("views_count", 0)
                     })
                     break
+    print(f"DEBUG: find_corrected_matches - Corrected suggestions ({len(corrected_suggestions)} found): {corrected_suggestions}")
     return corrected_suggestions
 
 # Global dictionary to keep track of last start command time per user
@@ -144,6 +146,7 @@ async def save_post(_, msg: Message):
     result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
 
     if result.upserted_id is not None:
+        print(f"DEBUG: New movie saved: {movie_to_save['title']} (ID: {msg.id}, Lang: {movie_to_save['language']})")
         setting = settings_col.find_one({"key": "global_notify"})
         if setting and setting.get("value"):
             for user in users_col.find({"notify": {"$ne": False}}):
@@ -159,6 +162,8 @@ async def save_post(_, msg: Message):
                         print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
                     else:
                         print(f"Failed to send notification to user {user['_id']}: {e}")
+    else:
+        print(f"DEBUG: Movie with ID {msg.id} already exists or updated.")
 
 @app.on_message(filters.command("start"))
 async def start(_, msg: Message):
@@ -439,6 +444,7 @@ async def search(_, msg: Message):
     asyncio.create_task(delete_message_later(loading_message.chat.id, loading_message.id))
 
     query_clean = clean_text(query)
+    print(f"DEBUG: Search - Original query: '{query}', Cleaned query: '{query_clean}'")
     
     # সরাসরি মুভি ম্যাচিং
     matched_movies_direct = list(movies_col.find(
@@ -469,22 +475,25 @@ async def search(_, msg: Message):
 
         m = await msg.reply("🎬 নিচের রেজাল্টগুলো পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
+        print(f"DEBUG: Direct match found for '{query_clean}'. Sent results and language filter buttons.")
         return
 
     # কাছাকাছি মিল খুঁজে বের করা
+    # এখানে LIMIT বাড়ানো হয়েছে যাতে ফজিউইজি ভালোভাবে কাজ করতে পারে
     all_movie_data_cursor = movies_col.find(
-        {}, # এখানে কোনো প্রাথমিক ফিল্টার নেই, যাতে ফজিউইজি সমস্ত ডেটার উপর কাজ করতে পারে
+        {}, 
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(500) # LIMIT বাড়ানো হয়েছে
+    ).limit(1000) # LIMIT বাড়িয়ে 1000 করা হলো
 
     all_movie_data = list(all_movie_data_cursor)
+    print(f"DEBUG: Fetched {len(all_movie_data)} movies for fuzzy matching.")
 
     corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
         thread_pool_executor,
         find_corrected_matches,
         query_clean,
         all_movie_data,
-        60, # স্কোর কাটঅফ 60 এ কমানো হয়েছে
+        55, # স্কোর কাটঅফ 55 এ কমানো হয়েছে
         RESULTS_COUNT
     )
 
@@ -510,6 +519,7 @@ async def search(_, msg: Message):
 
         m = await msg.reply("🔍 সরাসরি মিলে যায়নি, তবে কাছাকাছি কিছু পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
+        print(f"DEBUG: Fuzzy match found for '{query_clean}'. Sent results and language filter buttons.")
     else:
         # কোনো ফলাফল না পেলে
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
@@ -542,6 +552,7 @@ async def search(_, msg: Message):
             quote=True
         )
         asyncio.create_task(delete_message_later(alert.chat.id, alert.id))
+        print(f"DEBUG: No direct or fuzzy match found for '{query_clean}'. Sent no-result message.")
 
         encoded_query = urllib.parse.quote_plus(query)
         admin_btns = InlineKeyboardMarkup([[
@@ -568,6 +579,7 @@ async def search(_, msg: Message):
 @app.on_callback_query()
 async def callback_handler(_, cq: CallbackQuery):
     data = cq.data
+    print(f"DEBUG: Callback received: {data}")
 
     if data == "confirm_delete_all_movies":
         movies_col.delete_many({})
@@ -586,31 +598,29 @@ async def callback_handler(_, cq: CallbackQuery):
         parts = data.split("_", 2)
         if len(parts) < 3:
             await cq.answer("অকার্যকর কলব্যাক ডেটা ফরম্যাট।", show_alert=True)
-            print(f"DEBUG: Invalid callback data format for filter_lang_: {data}") 
+            print(f"ERROR: Invalid callback data format for filter_lang_: {data}") 
             return
         
         _, lang, encoded_query_clean = parts
         query_clean = urllib.parse.unquote_plus(encoded_query_clean) 
 
-        print(f"DEBUG: Callback - lang: '{lang}', query_clean: '{query_clean}'") 
+        print(f"DEBUG: Callback - filter_lang_ - lang: '{lang}', query_clean: '{query_clean}'") 
 
         # ভাষা এবং পরিষ্কার করা সার্চ টার্ম দিয়ে মুভি খোঁজা
-        # এখানে 'language' ফিল্ডে regex ব্যবহার করা হচ্ছে যাতে 'Hindi movie', 'Bengali only' ইত্যাদি মানও ম্যাচ করে।
-        # Pattern: ".*Hindi.*" মানে স্ট্রিং এর যেকোনো জায়গায় 'Hindi' থাকলে ম্যাচ করবে।
-        # কিন্তু আরও নির্ভুল হতে চাইলে, আপনি কেবল ^Hindi বা Hindi$ ব্যবহার করতে পারেন যদি আপনার ফরম্যাট স্থির থাকে।
-        # সহজ করার জন্য, আমি এখানে .* ব্যবহার করছি।
-        lang_regex = re.compile(f".*{re.escape(lang)}.*", re.IGNORECASE) # কেস-ইনসেনসিটিভ সার্চ
+        lang_regex = re.compile(f".*{re.escape(lang)}.*", re.IGNORECASE)
 
+        # এখানে title_clean এবং language উভয় ফিল্ডে ডেটা আনা হচ্ছে
         potential_lang_matches_cursor = movies_col.find(
-            {"language": {"$regex": lang_regex}, "title_clean": {"$regex": re.escape(query_clean), "$options": "i"}},
-            {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1, "language": 1} # language ফিল্ডটিও fetch করছি
-        ).limit(50) # এখানে 50টি পর্যন্ত মুভি আনা হচ্ছে ফজিউইজি এর জন্য।
+            {"language": {"$regex": lang_regex}}, # প্রথমে শুধু ভাষার উপর ফিল্টার করা
+            {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1, "language": 1}
+        ).limit(500) # LIMIT বাড়িয়ে 500 করা হলো, যাতে ফজিউইজি এর কাছে বেশি ডেটা থাকে
 
         potential_lang_matches = list(potential_lang_matches_cursor)
+        print(f"DEBUG: Filtered {len(potential_lang_matches)} movies by language '{lang}' before fuzzy matching.")
         
         fuzzy_data_for_matching_lang = [
             {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"], 
-             "language": m.get("language", ""), "views_count": m.get("views_count", 0)} # language ফিল্ডটিও পাস করা হচ্ছে
+             "language": m.get("language", ""), "views_count": m.get("views_count", 0)} 
             for m in potential_lang_matches
         ]
         
@@ -618,9 +628,9 @@ async def callback_handler(_, cq: CallbackQuery):
         matches_filtered_by_lang = await loop.run_in_executor(
             thread_pool_executor,
             find_corrected_matches,
-            query_clean,
-            fuzzy_data_for_matching_lang,
-            60, # স্কোর কাটঅফ 60 এ কমানো হয়েছে
+            query_clean, # মূল query_clean ব্যবহার করুন
+            fuzzy_data_for_matching_lang, # শুধুমাত্র ভাষা দ্বারা ফিল্টার করা ডেটা পাস করা হচ্ছে
+            55, # স্কোর কাটঅফ 55 এ কমানো হয়েছে
             RESULTS_COUNT
         )
 
@@ -635,12 +645,14 @@ async def callback_handler(_, cq: CallbackQuery):
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
                 asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
+                print(f"DEBUG: Sent {len(matches_filtered_by_lang)} language-filtered results for '{query_clean}' (Lang: {lang}).")
             except Exception as e:
-                print(f"Error editing message after language filter: {e}")
+                print(f"ERROR: Error editing message after language filter for '{query_clean}' (Lang: {lang}): {e}")
                 await cq.answer("ফলাফল দেখানোর সময় সমস্যা হয়েছে।", show_alert=True)
         else:
             await cq.answer(f"দুঃখিত, '{lang}' ভাষায় '{urllib.parse.unquote_plus(encoded_query_clean)}' এর জন্য কোনো মুভি পাওয়া যায়নি।", show_alert=True)
-        await cq.answer()
+            print(f"DEBUG: No language-filtered results found for '{query_clean}' (Lang: {lang}).")
+        await cq.answer() # এখানে কোয়েরি অ্যানসার করা হচ্ছে, যাতে লোডিং স্পিন বন্ধ হয়
 
     elif data.startswith("request_movie_"):
         _, user_id_str, encoded_movie_name = data.split("_", 2)
@@ -657,6 +669,7 @@ async def callback_handler(_, cq: CallbackQuery):
         })
         
         await cq.answer(f"আপনার অনুরোধ '{movie_name}' সফলভাবে জমা দেওয়া হয়েছে।", show_alert=True)
+        print(f"DEBUG: Request created for '{movie_name}' by user {user_id}.")
         
         admin_request_btns = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ সম্পন্ন হয়েছে", callback_data=f"req_fulfilled_{user_id}_{encoded_movie_name}"),
@@ -674,7 +687,7 @@ async def callback_handler(_, cq: CallbackQuery):
                     disable_web_page_preview=True
                 )
             except Exception as e:
-                print(f"Could not notify admin {admin_id} about request from callback: {e}")
+                print(f"ERROR: Could not notify admin {admin_id} about request from callback: {e}")
         
         try:
             edited_msg = await cq.message.edit_text(
@@ -684,7 +697,7 @@ async def callback_handler(_, cq: CallbackQuery):
             )
             asyncio.create_task(delete_message_later(edited_msg.chat.id, edited_msg.id))
         except Exception as e:
-            print(f"Error editing user message after request: {e}")
+            print(f"ERROR: Error editing user message after request: {e}")
 
     elif data.startswith("like_") or data.startswith("dislike_"):
         action, message_id_str, user_id_str = data.split("_", 2)
@@ -695,10 +708,12 @@ async def callback_handler(_, cq: CallbackQuery):
         
         if not movie:
             await cq.answer("দুঃখিত, এই মুভিটি খুঁজে পাওয়া যায়নি।", show_alert=True)
+            print(f"DEBUG: Movie {movie_message_id} not found for like/dislike.")
             return
 
         if user_id in movie.get("rated_by", []):
             await cq.answer("আপনি ইতিমধ্যেই এই মুভিতে রেটিং দিয়েছেন!", show_alert=True)
+            print(f"DEBUG: User {user_id} already rated movie {movie_message_id}.")
             return
 
         update_query = {"$inc": {}, "$push": {"rated_by": user_id}}
@@ -723,8 +738,9 @@ async def callback_handler(_, cq: CallbackQuery):
         try:
             await cq.message.edit_reply_markup(reply_markup=new_rating_buttons)
             await cq.answer("আপনার রেটিং রেকর্ড করা হয়েছে! ধন্যবাদ।", show_alert=True)
+            print(f"DEBUG: User {user_id} {action}d movie {movie_message_id}. Likes: {updated_likes}, Dislikes: {updated_dislikes}")
         except Exception as e:
-            print(f"Error editing message after rating: {e}")
+            print(f"ERROR: Error editing message after rating: {e}")
             await cq.answer("রেটিং আপডেট করতে সমস্যা হয়েছে।", show_alert=True)
 
     elif data.startswith("req_fulfilled_") or data.startswith("req_rejected_"):
@@ -750,9 +766,10 @@ async def callback_handler(_, cq: CallbackQuery):
             await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(f"✅ সম্পন্ন হয়েছে: {status_text}", callback_data="noop")
             ]]))
+            print(f"DEBUG: Request for '{movie_name}' by user {user_id} marked as {status}.")
         except Exception as e:
             await cq.answer("ব্যবহারকারীকে বার্তা পাঠানো যায়নি।", show_alert=True)
-            print(f"Error notifying user about request status: {e}")
+            print(f"ERROR: Error notifying user about request status: {e}")
             
     elif "_" in data:
         parts = data.split("_", 3)
@@ -775,16 +792,20 @@ async def callback_handler(_, cq: CallbackQuery):
                     await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton(f"✅ উত্তর দেওয়া হয়েছে: {responses[reason].split(' ')[0]}", callback_data="noop")
                     ]]))
+                    print(f"DEBUG: Admin replied to no-result query '{raw_query}' for user {uid} with reason '{reason}'.")
                 except Exception as e:
                     await cq.answer("ইউজারকে বার্তা পাঠাতে সমস্যা হয়েছে।", show_alert=True)
-                    print(f"Error sending admin feedback message: {e}")
+                    print(f"ERROR: Error sending admin feedback message: {e}")
             else:
                 await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
+                print(f"ERROR: Unknown noresult reason: {data}")
         else:
             await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
+            print(f"ERROR: Unhandled callback data: {data}")
             
     else: 
         await cq.answer("আপনার অনুরোধ প্রক্রিয়া করা হচ্ছে।", show_alert=False)
+        print(f"DEBUG: Default callback answer for: {data}")
 
 
 if __name__ == "__main__":
