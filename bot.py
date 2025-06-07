@@ -100,6 +100,13 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=55, 
     if not all_movie_titles_data:
         print("DEBUG: find_corrected_matches - No movie data provided.")
         return []
+    
+    # যদি query_clean খালি হয়, তাহলে fuzzywuzzy ব্যবহার করা সম্ভব নয়
+    if not query_clean.strip():
+        print("DEBUG: find_corrected_matches - query_clean is empty, cannot perform fuzzy matching.")
+        # এই ক্ষেত্রে, আমরা শুধুমাত্র ভাষার উপর ভিত্তি করে প্রথম কয়েকটি মুভি ফেরত দিতে পারি,
+        # অথবা একটি খালি তালিকা ফেরত দিতে পারি। এখানে খালি তালিকা ফেরত দেওয়া হলো।
+        return [] 
 
     choices = [item["title_clean"] for item in all_movie_titles_data]
     
@@ -422,15 +429,23 @@ async def request_movie(_, msg: Message):
 @app.on_message(filters.text & (filters.group | filters.private))
 async def search(_, msg: Message):
     query = msg.text.strip()
+    print(f"DEBUG: Search function triggered. Raw query: '{query}'")
+
     if not query:
-        return
+        print("DEBUG: Search - Query is empty or only whitespace. Returning.")
+        # এখানে কোনো মেসেজ না পাঠিয়ে শুধু রিটার্ন করা হলো।
+        # কারণ ফাঁকা ক্যোয়ারি দিয়ে সার্চ করার চেষ্টা করাটা অর্থহীন।
+        return 
 
     if msg.chat.type == "group":
         if len(query) < 3: # গ্রুপ চ্যাটে ছোট কোয়েরি ইগনোর করা
+            print(f"DEBUG: Search - Group chat query '{query}' too short. Returning.")
             return
         if msg.reply_to_message or msg.from_user.is_bot:
+            print(f"DEBUG: Search - Group chat: is reply or from bot. Returning.")
             return
         if not re.search(r'[a-zA-Z0-9]', query):
+            print(f"DEBUG: Search - Group chat: query '{query}' contains no alphanumeric chars. Returning.")
             return
 
     user_id = msg.from_user.id
@@ -445,7 +460,15 @@ async def search(_, msg: Message):
 
     query_clean = clean_text(query)
     print(f"DEBUG: Search - Original query: '{query}', Cleaned query: '{query_clean}'")
-    
+
+    # যদি clean_text করার পরেও query_clean খালি থাকে, তাহলে সার্চ করা অর্থহীন।
+    if not query_clean:
+        await loading_message.delete()
+        print("DEBUG: Search - Cleaned query is empty. Not proceeding with search.")
+        error_msg = await msg.reply("অনুগ্রহ করে একটি বৈধ মুভির নাম লিখুন।", quote=True)
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
+        return
+
     # সরাসরি মুভি ম্যাচিং
     matched_movies_direct = list(movies_col.find(
         {"$or": [
@@ -483,10 +506,10 @@ async def search(_, msg: Message):
     all_movie_data_cursor = movies_col.find(
         {}, 
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(1000) # LIMIT বাড়িয়ে 1000 করা হলো
+    ).limit(2000) # LIMIT বাড়িয়ে 2000 করা হলো, আরও বেশি ডেটা আনার জন্য
 
     all_movie_data = list(all_movie_data_cursor)
-    print(f"DEBUG: Fetched {len(all_movie_data)} movies for fuzzy matching.")
+    print(f"DEBUG: Fetched {len(all_movie_data)} movies for fuzzy matching (initial search).")
 
     corrected_suggestions = await asyncio.get_event_loop().run_in_executor(
         thread_pool_executor,
@@ -574,7 +597,7 @@ async def search(_, msg: Message):
                     disable_web_page_preview=True
                 )
             except Exception as e:
-                print(f"Could not notify admin {admin_id}: {e}")
+                print(f"ERROR: Could not notify admin {admin_id}: {e}")
 
 @app.on_callback_query()
 async def callback_handler(_, cq: CallbackQuery):
@@ -598,25 +621,58 @@ async def callback_handler(_, cq: CallbackQuery):
         parts = data.split("_", 2)
         if len(parts) < 3:
             await cq.answer("অকার্যকর কলব্যাক ডেটা ফরম্যাট।", show_alert=True)
-            print(f"ERROR: Invalid callback data format for filter_lang_: {data}") 
+            print(f"ERROR: Invalid callback data format for filter_lang_: {data}. Parts: {parts}") 
             return
         
         _, lang, encoded_query_clean = parts
         query_clean = urllib.parse.unquote_plus(encoded_query_clean) 
 
         print(f"DEBUG: Callback - filter_lang_ - lang: '{lang}', query_clean: '{query_clean}'") 
+        
+        # যদি query_clean খালি থাকে, তাহলে শুধুমাত্র ভাষার উপর ভিত্তি করে মুভি দেখানো
+        if not query_clean.strip():
+            print(f"DEBUG: Callback - query_clean is empty for language filter '{lang}'. Fetching movies by language only.")
+            # এখানে শুধু ভাষার উপর ভিত্তি করে মুভি খুঁজে বের করা হচ্ছে
+            lang_regex = re.compile(f".*{re.escape(lang)}.*", re.IGNORECASE)
+            
+            # সরাসরি ভাষার উপর ভিত্তি করে মুভি খোঁজা, কোনো fuzzywuzzy ছাড়া
+            movies_by_lang_only = list(movies_col.find(
+                {"language": {"$regex": lang_regex}},
+                {"title": 1, "message_id": 1, "views_count": 1}
+            ).sort("views_count", -1).limit(RESULTS_COUNT)) # জনপ্রিয়তার ভিত্তিতে সর্ট করে দেখানো
 
-        # ভাষা এবং পরিষ্কার করা সার্চ টার্ম দিয়ে মুভি খোঁজা
+            if movies_by_lang_only:
+                buttons = []
+                for m in movies_by_lang_only:
+                    buttons.append([InlineKeyboardButton(f"{m['title'][:40]} ({m.get('views_count',0)} ভিউ)", url=f"https://t.me/{app.me.username}?start=watch_{m['message_id']}")])
+                
+                try:
+                    reply_msg = await cq.message.edit_text(
+                        f"ফলাফল ({lang} মুভি) - নিচের থেকে সিলেক্ট করুন:",
+                        reply_markup=InlineKeyboardMarkup(buttons)
+                    )
+                    asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
+                    print(f"DEBUG: Sent {len(movies_by_lang_only)} language-only results for '{lang}'.")
+                except Exception as e:
+                    print(f"ERROR: Error editing message for language-only filter: {e}")
+                    await cq.answer("ফলাফল দেখানোর সময় সমস্যা হয়েছে।", show_alert=True)
+            else:
+                await cq.answer(f"দুঃখিত, '{lang}' ভাষায় কোনো মুভি পাওয়া যায়নি।", show_alert=True)
+                print(f"DEBUG: No language-only results found for '{lang}'.")
+            await cq.answer()
+            return # এখানে রিটার্ন করা হলো কারণ fuzzy matching এর প্রয়োজন নেই
+
+
+        # ভাষা এবং পরিষ্কার করা সার্চ টার্ম দিয়ে মুভি খোঁজা (যদি query_clean থাকে)
         lang_regex = re.compile(f".*{re.escape(lang)}.*", re.IGNORECASE)
 
-        # এখানে title_clean এবং language উভয় ফিল্ডে ডেটা আনা হচ্ছে
         potential_lang_matches_cursor = movies_col.find(
-            {"language": {"$regex": lang_regex}}, # প্রথমে শুধু ভাষার উপর ফিল্টার করা
+            {"language": {"$regex": lang_regex}}, 
             {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1, "language": 1}
-        ).limit(500) # LIMIT বাড়িয়ে 500 করা হলো, যাতে ফজিউইজি এর কাছে বেশি ডেটা থাকে
+        ).limit(2000) # LIMIT বাড়িয়ে 2000 করা হলো
 
         potential_lang_matches = list(potential_lang_matches_cursor)
-        print(f"DEBUG: Filtered {len(potential_lang_matches)} movies by language '{lang}' before fuzzy matching.")
+        print(f"DEBUG: Filtered {len(potential_lang_matches)} movies by language '{lang}' before fuzzy matching for query '{query_clean}'.")
         
         fuzzy_data_for_matching_lang = [
             {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"], 
@@ -628,8 +684,8 @@ async def callback_handler(_, cq: CallbackQuery):
         matches_filtered_by_lang = await loop.run_in_executor(
             thread_pool_executor,
             find_corrected_matches,
-            query_clean, # মূল query_clean ব্যবহার করুন
-            fuzzy_data_for_matching_lang, # শুধুমাত্র ভাষা দ্বারা ফিল্টার করা ডেটা পাস করা হচ্ছে
+            query_clean, 
+            fuzzy_data_for_matching_lang, 
             55, # স্কোর কাটঅফ 55 এ কমানো হয়েছে
             RESULTS_COUNT
         )
@@ -652,7 +708,7 @@ async def callback_handler(_, cq: CallbackQuery):
         else:
             await cq.answer(f"দুঃখিত, '{lang}' ভাষায় '{urllib.parse.unquote_plus(encoded_query_clean)}' এর জন্য কোনো মুভি পাওয়া যায়নি।", show_alert=True)
             print(f"DEBUG: No language-filtered results found for '{query_clean}' (Lang: {lang}).")
-        await cq.answer() # এখানে কোয়েরি অ্যানসার করা হচ্ছে, যাতে লোডিং স্পিন বন্ধ হয়
+        await cq.answer() 
 
     elif data.startswith("request_movie_"):
         _, user_id_str, encoded_movie_name = data.split("_", 2)
