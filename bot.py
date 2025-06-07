@@ -82,7 +82,7 @@ def extract_year(text):
     match = re.search(r'\b(19|20)\d{2}\b', text)
     return int(match.group(0)) if match else None
 
-async def delete_message_later(chat_id, message_id, delay=300): # ডিলে 300 সেকেন্ড (5 মিনিট) সেট করা হয়েছে
+async def delete_message_later(chat_id, message_id, delay=60): # ডিলে 60 সেকেন্ড (1 মিনিট) সেট করা হয়েছে
     await asyncio.sleep(delay)
     try:
         await app.delete_messages(chat_id, message_id)
@@ -106,7 +106,8 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                     corrected_suggestions.append({
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
-                        "language": movie_data["language"]
+                        "language": movie_data["language"],
+                        "views_count": movie_data.get("views_count", 0) # ভিউ কাউন্ট যোগ করা হয়েছে
                     })
                     break
     return corrected_suggestions
@@ -168,12 +169,11 @@ async def start(_, msg: Message):
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
         try:
-            # app.forward_messages এর পরিবর্তে app.copy_message ব্যবহার করা হয়েছে
             copied_message = await app.copy_message(
-                chat_id=msg.chat.id,        # যেখানে মেসেজটি পাঠানো হবে (ইউজারের চ্যাট)
-                from_chat_id=CHANNEL_ID,    # যেখান থেকে মেসেজটি কপি করা হবে (আপনার চ্যানেল)
-                message_id=message_id,      # মূল মেসেজের আইডি
-                protect_content=True        # কন্টেন্ট সুরক্ষা নিশ্চিত করতে
+                chat_id=msg.chat.id,
+                from_chat_id=CHANNEL_ID,
+                message_id=message_id,
+                protect_content=True
             )
             
             movie_data = movies_col.find_one({"message_id": message_id})
@@ -191,10 +191,10 @@ async def start(_, msg: Message):
                     chat_id=msg.chat.id,
                     text="মুভিটি কেমন লাগলো? রেটিং দিন:",
                     reply_markup=rating_buttons,
-                    reply_to_message_id=copied_message.id # কপি করা মেসেজের আইডি ব্যবহার করা হয়েছে
+                    reply_to_message_id=copied_message.id
                 )
                 asyncio.create_task(delete_message_later(rating_message.chat.id, rating_message.id))
-                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id)) # কপি করা মেসেজ ডিলিট করুন
+                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
 
             movies_col.update_one(
                 {"message_id": message_id},
@@ -433,6 +433,7 @@ async def search(_, msg: Message):
 
     query_clean = clean_text(query)
     
+    # সরাসরি মুভি ম্যাচিং
     matched_movies_direct = list(movies_col.find(
         {"$or": [
             {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}},
@@ -451,14 +452,23 @@ async def search(_, msg: Message):
                 )
             ])
         
+        # সরাসরি ফলাফল পাওয়ার পর ভাষার বাটন যোগ করা হচ্ছে
+        lang_filter_buttons = [
+            InlineKeyboardButton("বেঙ্গলি", callback_data=f"filter_lang_Bengali_{query_clean}"),
+            InlineKeyboardButton("হিন্দি", callback_data=f"filter_lang_Hindi_{query_clean}"),
+            InlineKeyboardButton("ইংলিশ", callback_data=f"filter_lang_English_{query_clean}")
+        ]
+        buttons.append(lang_filter_buttons) # বিদ্যমান বাটনের সাথে ভাষার বাটন যুক্ত করা হলো
+
         m = await msg.reply("🎬 নিচের রেজাল্টগুলো পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
+    # কাছাকাছি মিল খুঁজে বের করা (যদি সরাসরি ম্যাচ না পাওয়া যায়)
     all_movie_data_cursor = movies_col.find(
         {"title_clean": {"$regex": query_clean, "$options": "i"}},
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(100)
+    ).limit(100) # এখানে লিমিট বাড়ানো হয়েছে যাতে ফজিউইজি ভালোভাবে কাজ করতে পারে
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -483,24 +493,34 @@ async def search(_, msg: Message):
                 )
             ])
         
+        # কাছাকাছি মিল পেলে ভাষার বাটন যোগ করা হচ্ছে
         lang_buttons = [
-            InlineKeyboardButton("বেঙ্গলি", callback_data=f"lang_Bengali_{query_clean}"),
-            InlineKeyboardButton("হিন্দি", callback_data=f"lang_Hindi_{query_clean}"),
-            InlineKeyboardButton("ইংলিশ", callback_data=f"lang_English_{query_clean}")
+            InlineKeyboardButton("বেঙ্গলি", callback_data=f"filter_lang_Bengali_{query_clean}"), # এখানেও filter_lang_ ব্যবহার করা হয়েছে
+            InlineKeyboardButton("হিন্দি", callback_data=f"filter_lang_Hindi_{query_clean}"),
+            InlineKeyboardButton("ইংলিশ", callback_data=f"filter_lang_English_{query_clean}")
         ]
         buttons.append(lang_buttons)
 
         m = await msg.reply("🔍 সরাসরি মিলে যায়নি, তবে কাছাকাছি কিছু পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
+        # কোনো ফলাফল না পেলে
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
         
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
         
+        # যখন কোনো ফলাফলই পাওয়া যায় না, তখনও ভাষার বাটনগুলো দেখানো হচ্ছে
+        lang_buttons_no_result = [
+            InlineKeyboardButton("বেঙ্গলি মুভি দেখুন", callback_data=f"filter_lang_Bengali_{query_clean}"),
+            InlineKeyboardButton("হিন্দি মুভি দেখুন", callback_data=f"filter_lang_Hindi_{query_clean}"),
+            InlineKeyboardButton("ইংলিশ মুভি দেখুন", callback_data=f"filter_lang_English_{query_clean}")
+        ]
+
         reply_markup_for_no_result = InlineKeyboardMarkup([
             google_button_row,
-            [request_button]
+            [request_button],
+            lang_buttons_no_result
         ])
 
         alert = await msg.reply_text( 
@@ -555,9 +575,10 @@ async def callback_handler(_, cq: CallbackQuery):
     elif data.startswith("movie_"):
         await cq.answer("মুভিটি ফরওয়ার্ড করার জন্য আমাকে ব্যক্তিগতভাবে মেসেজ করুন।", show_alert=True)
 
-    elif data.startswith("lang_"):
+    elif data.startswith("filter_lang_"): # নতুন এই হ্যান্ডলার যোগ করা হয়েছে
         _, lang, query_clean = data.split("_", 2)
         
+        # এখানে query_clean ব্যবহার করে সেই ভাষার মুভিগুলো খুঁজবে
         potential_lang_matches_cursor = movies_col.find(
             {"language": lang, "title_clean": {"$regex": query_clean, "$options": "i"}},
             {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1}
@@ -585,14 +606,24 @@ async def callback_handler(_, cq: CallbackQuery):
             buttons = []
             for m in matches_filtered_by_lang[:RESULTS_COUNT]:
                 buttons.append([InlineKeyboardButton(f"{m['title'][:40]} ({m.get('views_count',0)} ভিউ)", url=f"https://t.me/{app.me.username}?start=watch_{m['message_id']}")])
-            reply_msg = await cq.message.edit_text(
-                f"ফলাফল ({lang}) - নিচের থেকে সিলেক্ট করুন:",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-            asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
+            
+            # মেসেজ এডিট করার আগে নিশ্চিত করুন cq.message বিদ্যমান এবং এটি একটি মেসেজ।
+            # এটি একটি CallbackQuery, তাই এর সাথে যুক্ত মেসেজটিকে এডিট করা হচ্ছে।
+            try:
+                reply_msg = await cq.message.edit_text(
+                    f"ফলাফল ({lang} মুভি) - নিচের থেকে সিলেক্ট করুন:",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+                asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
+            except Exception as e:
+                print(f"Error editing message after language filter: {e}")
+                await cq.answer("ফলাফল দেখানোর সময় সমস্যা হয়েছে।", show_alert=True)
         else:
-            await cq.answer("এই ভাষায় কিছু পাওয়া যায়নি।", show_alert=True)
+            await cq.answer(f"দুঃখিত, '{lang}' ভাষায় '{urllib.parse.unquote_plus(query_clean)}' এর জন্য কোনো মুভি পাওয়া যায়নি।", show_alert=True)
         await cq.answer()
+
+    # আপনার পূর্বের 'lang_' হ্যান্ডলার বাদ দেওয়া হয়েছে কারণ 'filter_lang_' এখন সবক্ষেত্রেই ব্যবহৃত হচ্ছে।
+    # যদি আপনি 'lang_' হ্যান্ডলারটি আলাদা রাখতে চান, তাহলে এই কমেন্টটি উপেক্ষা করুন।
 
     elif data.startswith("request_movie_"):
         _, user_id_str, encoded_movie_name = data.split("_", 2)
