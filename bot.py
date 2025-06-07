@@ -54,7 +54,10 @@ except DuplicateKeyError as e:
 except OperationFailure as e:
     print(f"Error creating index 'message_id': {e}")
 
-movies_col.create_index("language", background=True)
+# এখানে language ফিল্ডে regex search করার জন্য আলাদা ইন্ডেক্স খুব একটা কার্যকর হবে না,
+# কারণ regex startsWith বা exact match না হলে ইন্ডেক্স পুরোপুরি ব্যবহার করতে পারে না।
+# তবুও, এটি রাখা হলো যদি ভবিষ্যতে exact match এর প্রয়োজন হয়।
+movies_col.create_index("language", background=True) 
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], background=True)
 movies_col.create_index([("views_count", ASCENDING)], background=True)
@@ -72,15 +75,14 @@ thread_pool_executor = ThreadPoolExecutor(max_workers=5)
 
 # Helpers
 def clean_text(text):
-    # শুধু বর্ণমালা ও সংখ্যা রেখে অন্য সব ক্যারেক্টার বাদ দেওয়া এবং লোয়ারকেস করা
     return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
 
 def extract_language(text):
-    # নিশ্চিত করুন যে এই তালিকাটি আপনার ডাটাবেসের 'language' ফিল্ডের মানের সাথে হুবহু মেলে
-    langs = ["Bengali", "Hindi", "English"] 
-    for lang in langs:
-        if lang.lower() in text.lower():
-            return lang # যদি পাওয়া যায়, তবে সঠিক কেস সহ ভাষাটি ফেরত দিন
+    # এই ফাংশনটি এখন শুধু মূল ভাষার নাম খুঁজে বের করবে, "movie" বা অন্য কিছু যোগ করবে না।
+    # এটি নিশ্চিত করবে যে ডাটাবেসে 'Bengali', 'Hindi', 'English' সেভ হচ্ছে।
+    if "bengali" in text.lower(): return "Bengali"
+    if "hindi" in text.lower(): return "Hindi"
+    if "english" in text.lower(): return "English"
     return None
 
 def extract_year(text):
@@ -95,7 +97,7 @@ async def delete_message_later(chat_id, message_id, delay=60): # ডিলে 60
         if "MESSAGE_ID_INVALID" not in str(e) and "MESSAGE_DELETE_FORBIDDEN" not in str(e):
             print(f"Error deleting message {message_id} in chat {chat_id}: {e}")
 
-def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, limit=5):
+def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=60, limit=10): # স্কোর কাটঅফ 60 এ কমানো হয়েছে
     if not all_movie_titles_data:
         return []
 
@@ -112,7 +114,7 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
                         "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0) # ভিউ কাউন্ট যোগ করা হয়েছে
+                        "views_count": movie_data.get("views_count", 0)
                     })
                     break
     return corrected_suggestions
@@ -131,7 +133,7 @@ async def save_post(_, msg: Message):
         "title": text,
         "date": msg.date,
         "year": extract_year(text),
-        "language": extract_language(text), # নিশ্চিত করুন এটি সঠিক ভাষা রিটার্ন করছে
+        "language": extract_language(text), # এটি এখন শুধু 'Bengali', 'Hindi', 'English' সেভ করবে
         "title_clean": clean_text(text),
         "views_count": 0,
         "likes": 0,
@@ -419,7 +421,7 @@ async def search(_, msg: Message):
         return
 
     if msg.chat.type == "group":
-        if len(query) < 3:
+        if len(query) < 3: # গ্রুপ চ্যাটে ছোট কোয়েরি ইগনোর করা
             return
         if msg.reply_to_message or msg.from_user.is_bot:
             return
@@ -457,25 +459,23 @@ async def search(_, msg: Message):
                 )
             ])
         
-        # সরাসরি ফলাফল পাওয়ার পর ভাষার বাটন যোগ করা হচ্ছে
-        # query_clean কে কলব্যাক ডেটার জন্য encode করা হচ্ছে
         encoded_query_clean_for_callback = urllib.parse.quote_plus(query_clean)
         lang_filter_buttons = [
             InlineKeyboardButton("বেঙ্গলি", callback_data=f"filter_lang_Bengali_{encoded_query_clean_for_callback}"),
             InlineKeyboardButton("হিন্দি", callback_data=f"filter_lang_Hindi_{encoded_query_clean_for_callback}"),
             InlineKeyboardButton("ইংলিশ", callback_data=f"filter_lang_English_{encoded_query_clean_for_callback}")
         ]
-        buttons.append(lang_filter_buttons) # বিদ্যমান বাটনের সাথে ভাষার বাটন যুক্ত করা হলো
+        buttons.append(lang_filter_buttons)
 
         m = await msg.reply("🎬 নিচের রেজাল্টগুলো পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # কাছাকাছি মিল খুঁজে বের করা (যদি সরাসরি ম্যাচ না পাওয়া যায়)
+    # কাছাকাছি মিল খুঁজে বের করা
     all_movie_data_cursor = movies_col.find(
-        {}, # এখানে আর query_clean দিয়ে প্রথম ফিল্টার করা হচ্ছে না, যাতে ফজিউইজি সব ডেটার উপর কাজ করতে পারে
+        {}, # এখানে কোনো প্রাথমিক ফিল্টার নেই, যাতে ফজিউইজি সমস্ত ডেটার উপর কাজ করতে পারে
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(500) # এখানে লিমিট বাড়ানো হয়েছে যাতে ফজিউইজি ভালোভাবে কাজ করতে পারে
+    ).limit(500) # LIMIT বাড়ানো হয়েছে
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -484,7 +484,7 @@ async def search(_, msg: Message):
         find_corrected_matches,
         query_clean,
         all_movie_data,
-        70,
+        60, # স্কোর কাটঅফ 60 এ কমানো হয়েছে
         RESULTS_COUNT
     )
 
@@ -500,7 +500,6 @@ async def search(_, msg: Message):
                 )
             ])
         
-        # কাছাকাছি মিল পেলে ভাষার বাটন যোগ করা হচ্ছে
         encoded_query_clean_for_callback = urllib.parse.quote_plus(query_clean)
         lang_buttons = [
             InlineKeyboardButton("বেঙ্গলি", callback_data=f"filter_lang_Bengali_{encoded_query_clean_for_callback}"),
@@ -518,7 +517,6 @@ async def search(_, msg: Message):
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
         
-        # যখন কোনো ফলাফলই পাওয়া যায় না, তখনও ভাষার বাটনগুলো দেখানো হচ্ছে
         encoded_query_clean_for_callback = urllib.parse.quote_plus(query_clean)
         lang_buttons_no_result = [
             InlineKeyboardButton("বেঙ্গলি মুভি দেখুন", callback_data=f"filter_lang_Bengali_{encoded_query_clean_for_callback}"),
@@ -588,27 +586,31 @@ async def callback_handler(_, cq: CallbackQuery):
         parts = data.split("_", 2)
         if len(parts) < 3:
             await cq.answer("অকার্যকর কলব্যাক ডেটা ফরম্যাট।", show_alert=True)
-            print(f"DEBUG: Invalid callback data format for filter_lang_: {data}") # DEBUG
+            print(f"DEBUG: Invalid callback data format for filter_lang_: {data}") 
             return
         
         _, lang, encoded_query_clean = parts
-        query_clean = urllib.parse.unquote_plus(encoded_query_clean) # encoded string কে decode করা
+        query_clean = urllib.parse.unquote_plus(encoded_query_clean) 
 
-        # ***DEBUGGING: এখানে প্রিন্ট করে দেখুন lang এবং query_clean এর মান কী আসে।***
         print(f"DEBUG: Callback - lang: '{lang}', query_clean: '{query_clean}'") 
 
         # ভাষা এবং পরিষ্কার করা সার্চ টার্ম দিয়ে মুভি খোঁজা
+        # এখানে 'language' ফিল্ডে regex ব্যবহার করা হচ্ছে যাতে 'Hindi movie', 'Bengali only' ইত্যাদি মানও ম্যাচ করে।
+        # Pattern: ".*Hindi.*" মানে স্ট্রিং এর যেকোনো জায়গায় 'Hindi' থাকলে ম্যাচ করবে।
+        # কিন্তু আরও নির্ভুল হতে চাইলে, আপনি কেবল ^Hindi বা Hindi$ ব্যবহার করতে পারেন যদি আপনার ফরম্যাট স্থির থাকে।
+        # সহজ করার জন্য, আমি এখানে .* ব্যবহার করছি।
+        lang_regex = re.compile(f".*{re.escape(lang)}.*", re.IGNORECASE) # কেস-ইনসেনসিটিভ সার্চ
+
         potential_lang_matches_cursor = movies_col.find(
-            {"language": lang, "title_clean": {"$regex": re.escape(query_clean), "$options": "i"}}, # query_clean কে regex এর জন্য escape করা হয়েছে
-            {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1}
-        ).limit(50)
+            {"language": {"$regex": lang_regex}, "title_clean": {"$regex": re.escape(query_clean), "$options": "i"}},
+            {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1, "language": 1} # language ফিল্ডটিও fetch করছি
+        ).limit(50) # এখানে 50টি পর্যন্ত মুভি আনা হচ্ছে ফজিউইজি এর জন্য।
 
         potential_lang_matches = list(potential_lang_matches_cursor)
         
-        # ফজিউইজি ম্যাচিংয়ের জন্য ডেটা প্রস্তুত করা
         fuzzy_data_for_matching_lang = [
             {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"], 
-             "language": lang, "views_count": m.get("views_count", 0)}
+             "language": m.get("language", ""), "views_count": m.get("views_count", 0)} # language ফিল্ডটিও পাস করা হচ্ছে
             for m in potential_lang_matches
         ]
         
@@ -616,9 +618,9 @@ async def callback_handler(_, cq: CallbackQuery):
         matches_filtered_by_lang = await loop.run_in_executor(
             thread_pool_executor,
             find_corrected_matches,
-            query_clean, # মূল query_clean ব্যবহার করুন
+            query_clean,
             fuzzy_data_for_matching_lang,
-            70, # স্কোর কাটঅফ
+            60, # স্কোর কাটঅফ 60 এ কমানো হয়েছে
             RESULTS_COUNT
         )
 
@@ -675,11 +677,10 @@ async def callback_handler(_, cq: CallbackQuery):
                 print(f"Could not notify admin {admin_id} about request from callback: {e}")
         
         try:
-            # অনুরোধ করার পর মূল মেসেজের বাটনগুলো সরিয়ে দেওয়া হচ্ছে
             edited_msg = await cq.message.edit_text(
                 f"❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।\n\n"
                 f"আপনার অনুরোধ **'{movie_name}'** জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।",
-                reply_markup=None # বাটন সরিয়ে দেওয়া হলো
+                reply_markup=None 
             )
             asyncio.create_task(delete_message_later(edited_msg.chat.id, edited_msg.id))
         except Exception as e:
@@ -714,7 +715,7 @@ async def callback_handler(_, cq: CallbackQuery):
 
         new_rating_buttons = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(f"👍 লাইক ({updated_likes})", callback_data="noop"), # noop মানে নো-অপারেশন, যাতে ক্লিক করলে কিছু না হয়
+                InlineKeyboardButton(f"👍 লাইক ({updated_likes})", callback_data="noop"), 
                 InlineKeyboardButton(f"👎 ডিসলাইক ({updated_dislikes})", callback_data="noop")
             ]
         ])
@@ -754,12 +755,11 @@ async def callback_handler(_, cq: CallbackQuery):
             print(f"Error notifying user about request status: {e}")
             
     elif "_" in data:
-        # এটা আপনার পূর্বের admin_btns কলব্যাক হ্যান্ডলার
         parts = data.split("_", 3)
-        if len(parts) == 4 and parts[0] in ["noresult"]: # "noresult" prefix ব্যবহার করা হয়েছে
+        if len(parts) == 4 and parts[0] in ["noresult"]: 
             reason = parts[1]
             uid = int(parts[2])
-            raw_query = urllib.parse.unquote_plus(parts[3]) # এটা ঠিক করে দিয়েছি
+            raw_query = urllib.parse.unquote_plus(parts[3]) 
 
             responses = {
                 "wrong": f"❌ আপনি **'{raw_query}'** নামে ভুল সার্চ করেছেন। অনুগ্রহ করে সঠিক নাম লিখে আবার চেষ্টা করুন।",
@@ -783,7 +783,7 @@ async def callback_handler(_, cq: CallbackQuery):
         else:
             await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
             
-    else: # কোনো ম্যাচ না হলে ডিফল্ট অ্যানসার
+    else: 
         await cq.answer("আপনার অনুরোধ প্রক্রিয়া করা হচ্ছে।", show_alert=False)
 
 
