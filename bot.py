@@ -13,6 +13,7 @@ from fuzzywuzzy import process
 from concurrent.futures import ThreadPoolExecutor
 
 # Configs - নিশ্চিত করুন এই ভেরিয়েবলগুলো আপনার এনভায়রনমেন্টে সেট করা আছে।
+# IMPORTANT: API_ID, API_HASH, BOT_TOKEN, DATABASE_URL MUST be set.
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -22,9 +23,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
 
-# API_ID এবং অন্যান্য অপরিহার্য ভেরিয়েবল সেট করা হয়েছে কিনা তা পরীক্ষা করুন
+# Essential variable check before proceeding
 if not all([API_ID, API_HASH, BOT_TOKEN, DATABASE_URL]):
-    raise ValueError("One or more essential environment variables (API_ID, API_HASH, BOT_TOKEN, DATABASE_URL) are not set!")
+    raise ValueError("One or more essential environment variables (API_ID, API_HASH, BOT_TOKEN, DATABASE_URL) are not set! Please check your Render environment variables.")
 
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -37,11 +38,11 @@ stats_col = db["stats"]
 users_col = db["users"]
 settings_col = db["settings"]
 requests_col = db["requests"]
-connected_channels_col = db["connected_channels"] # নতুন কালেকশন
+connected_channels_col = db["connected_channels"]
 
 # Indexing - Optimized for faster search
 try:
-    movies_col.drop_index("message_id_1")
+    movies_col.drop_index("message_id_1") # Attempt to drop old index if it exists
     print("Existing 'message_id_1' index dropped successfully (if it existed).")
 except Exception as e:
     if "index not found" not in str(e):
@@ -50,7 +51,6 @@ except Exception as e:
         print("'message_id_1' index not found, proceeding with creation.")
 
 try:
-    # এই লাইনটি যোগ করুন যাতে message_id এবং channel_id মিলে ইউনিক হয়
     movies_col.create_index([("message_id", ASCENDING), ("channel_id", ASCENDING)], unique=True, background=True)
     print("Composite index 'message_id_channel_id' (unique) ensured successfully.")
 except DuplicateKeyError as e:
@@ -97,7 +97,7 @@ def extract_year(text):
     match = re.search(r'\b(19|20)\d{2}\b', text)
     return int(match.group(0)) if match else None
 
-async def delete_message_later(chat_id, message_id, delay=300): # ডিলে 300 সেকেন্ড (5 মিনিট) সেট করা হয়েছে
+async def delete_message_later(chat_id, message_id, delay=300): # Default delay 300 seconds (5 minutes)
     await asyncio.sleep(delay)
     try:
         await app.delete_messages(chat_id, message_id)
@@ -122,7 +122,7 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
                         "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0) # এখানে views_count যোগ করা হয়েছে
+                        "views_count": movie_data.get("views_count", 0)
                     })
                     break
     return corrected_suggestions
@@ -134,7 +134,7 @@ user_last_start_time = {}
 async def save_movie_to_db(msg: Message):
     text = msg.text or msg.caption
     if not text:
-        return None # Or raise an error, depending on desired behavior
+        return None
 
     movie_to_save = {
         "message_id": msg.id,
@@ -161,7 +161,7 @@ async def save_movie_to_db(msg: Message):
         elif result.modified_count:
             return "updated"
         else:
-            return "unchanged" # Already exists and no modification needed
+            return "unchanged"
     except DuplicateKeyError:
         print(f"Skipping duplicate: Message ID {msg.id} from channel {msg.chat.id} already exists.")
         return "duplicate"
@@ -170,25 +170,27 @@ async def save_movie_to_db(msg: Message):
         return "error"
 
 
-# dynamic_chat_filter
-# Get all connected channel IDs from DB
+# dynamic_chat_filter logic
 async def get_connected_channel_ids():
     channels = connected_channels_col.find({})
     return [channel["channel_id"] for channel in channels]
 
-# **সমস্যা সমাধানের জন্য এখানে পরিবর্তন করা হয়েছে**
-async def dynamic_channel_check(_, __, msg: Message):
+# This is the corrected filter function
+async def dynamic_channel_check(filter_instance, client_instance, msg: Message):
+    # Only process messages from channels/supergroups
+    if msg.chat.type not in ["channel", "supergroup"]:
+        return False
     connected_ids = await get_connected_channel_ids()
     return msg.chat.id in connected_ids
 
+# Register the dynamic filter
 dynamic_chat_filter = filters.create("DynamicChatFilter", dynamic_channel_check)
 
-@app.on_message(dynamic_chat_filter) # dynamic_chat_filter ব্যবহার করা হয়েছে
-async def save_post(_, msg: Message):
-    # এটি নিশ্চিত করতে যে এটি শুধুমাত্র বটের সংযুক্ত চ্যানেলে কাজ করে, অ্যাডমিনের প্রাইভেট চ্যাটে নয়
-    if msg.chat.type == "private" and msg.chat.id in ADMIN_IDS:
-        return
 
+@app.on_message(dynamic_chat_filter) # Use the dynamic filter here
+async def save_post(_, msg: Message):
+    # This handler specifically for saving posts from connected channels
+    # No need to check msg.chat.type or ADMIN_IDS here as the filter already handles it
     status = await save_movie_to_db(msg)
     if status == "inserted":
         setting = settings_col.find_one({"key": "global_notify"})
@@ -213,9 +215,10 @@ async def start(_, msg: Message):
     user_id = msg.from_user.id
     current_time = datetime.now(UTC)
 
+    # Cooldown for /start command to prevent spamming
     if user_id in user_last_start_time:
         time_since_last_start = current_time - user_last_start_time[user_id]
-        if time_since_last_start < timedelta(seconds=5):
+        if time_since_last_start < timedelta(seconds=3): # 3 seconds cooldown
             print(f"User {user_id} sent /start too quickly. Ignoring.")
             return
 
@@ -223,9 +226,8 @@ async def start(_, msg: Message):
 
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
-        # For watch_ links, we need to know WHICH channel the movie is from.
-        # This requires fetching from DB.
         movie_data = movies_col.find_one({"message_id": message_id})
+
         if not movie_data or "channel_id" not in movie_data:
             error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা লোড করা যায়নি। (ডেটা অসম্পূর্ণ)")
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
@@ -478,12 +480,18 @@ async def search(_, msg: Message):
     if not query:
         return
 
+    # Skip search if message is from a connected channel (handled by save_post)
+    connected_ids = await get_connected_channel_ids()
+    if msg.chat.type in ["channel", "supergroup"] and msg.chat.id in connected_ids:
+        return
+
+    # Specific checks for group chats to reduce unnecessary processing
     if msg.chat.type == "group":
-        if len(query) < 3:
+        if len(query) < 3: # Minimum 3 characters for group search
             return
-        if msg.reply_to_message or msg.from_user.is_bot:
+        if msg.reply_to_message or msg.from_user.is_bot: # Ignore replies or bot messages
             return
-        if not re.search(r'[a-zA-Z0-9]', query):
+        if not re.search(r'[a-zA-Z0-9]', query): # Ignore messages without alphanumeric characters
             return
 
     user_id = msg.from_user.id
@@ -494,7 +502,7 @@ async def search(_, msg: Message):
     )
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...", quote=True)
-    asyncio.create_task(delete_message_later(loading_message.chat.id, loading_message.id))
+    asyncio.create_task(delete_message_later(loading_message.chat.id, loading_message.id, delay=15)) # Shorter delay for loading message
 
     query_clean = clean_text(query)
 
@@ -528,7 +536,7 @@ async def search(_, msg: Message):
     all_movie_data_cursor = movies_col.find(
         {"title_clean": {"$regex": query_clean, "$options": "i"}},
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(100)
+    ).limit(100) # Limit for fuzzy search candidates
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -716,7 +724,6 @@ async def callback_handler(_, cq: CallbackQuery):
         movie_message_id = int(message_id_str)
         user_id = int(user_id_str)
 
-        # এখানে channel_id বাদ দেওয়া হয়েছে কারণ movie_data থেকে এটি লোড হবে
         movie = movies_col.find_one({"message_id": movie_message_id})
 
         if not movie:
@@ -733,7 +740,6 @@ async def callback_handler(_, cq: CallbackQuery):
         elif action == "dislike":
             update_query["$inc"]["dislikes"] = 1
 
-        # Use both message_id and channel_id for updating
         movies_col.update_one({"message_id": movie_message_id, "channel_id": movie["channel_id"]}, update_query)
 
         updated_movie = movies_col.find_one({"message_id": movie_message_id, "channel_id": movie["channel_id"]})
@@ -978,7 +984,7 @@ async def save_movie_from_other_channel(_, msg: Message):
             )
             asyncio.create_task(delete_message_later(success_msg.chat.id, success_msg.id))
         elif status == "unchanged":
-            info_msg = await msg.reply("মুভিটি ইতিমধ্যেই ডাটাবেসে বিদ্যমান এবং কোনো পরিবর্তনের প্রয়োজন হয়নি।")
+            info_msg = await msg.reply("মুভিটি ইতিমধ্যেই ডাataবেসে বিদ্যমান এবং কোনো পরিবর্তনের প্রয়োজন হয়নি।")
             asyncio.create_task(delete_message_later(info_msg.chat.id, info_msg.id))
         elif status == "duplicate":
             info_msg = await msg.reply("মুভিটি ইতিমধ্যেই ডাটাবেসে বিদ্যমান ছিল (ডুপ্লিকেট)।")
