@@ -11,13 +11,12 @@ import asyncio
 import urllib.parse
 from fuzzywuzzy import process
 from concurrent.futures import ThreadPoolExecutor
-from pyrogram import idle # pyrogram 2.0+ এর জন্য এটি দরকার
 
 # Configs - নিশ্চিত করুন এই ভেরিয়েবলগুলো আপনার এনভায়রনমেন্টে সেট করা আছে।
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID")) # এটি আপনার প্রধান চ্যানেল আইডি
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -104,80 +103,54 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
         if score >= score_cutoff:
             for movie_data in all_movie_titles_data:
                 if movie_data["title_clean"] == matched_clean_title:
-                    # 'views_count' যদি থাকে তাহলে যোগ করুন
-                    movie_data_to_add = {
+                    corrected_suggestions.append({
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
                         "language": movie_data["language"]
-                    }
-                    if "views_count" in movie_data:
-                        movie_data_to_add["views_count"] = movie_data["views_count"]
-                    corrected_suggestions.append(movie_data_to_add)
+                    })
                     break
     return corrected_suggestions
 
 # Global dictionary to keep track of last start command time per user
 user_last_start_time = {}
 
-# সংযুক্ত চ্যানেলগুলো লোড করার জন্য একটি ফাংশন যোগ করা হয়েছে।
-async def get_connected_channels():
-    connected_channels_doc = settings_col.find_one({"key": "connected_channels"})
-    if connected_channels_doc and "channel_ids" in connected_channels_doc:
-        return connected_channels_doc["channel_ids"]
-    return [CHANNEL_ID] # ডিফল্ট হিসেবে আপনার প্রধান চ্যানেল আইডি থাকবে
+@app.on_message(filters.chat(CHANNEL_ID))
+async def save_post(_, msg: Message):
+    text = msg.text or msg.caption
+    if not text:
+        return
 
-# বট চালু হওয়ার সময় একবার সংযুক্ত চ্যানেলগুলো লোড করার জন্য গ্লোবাল ভেরিয়েবল।
-connected_channels_list = []
+    movie_to_save = {
+        "message_id": msg.id,
+        "title": text,
+        "date": msg.date,
+        "year": extract_year(text),
+        "language": extract_language(text),
+        "title_clean": clean_text(text),
+        "views_count": 0,
+        "likes": 0,
+        "dislikes": 0,
+        "rated_by": []
+    }
+    
+    result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
 
-# নিশ্চিত করুন যে বট শুরু হওয়ার সময় connected_channels_list লোড হয়
-@app.on_raw_update()
-async def _(client, update, users, chats):
-    global connected_channels_list
-    if not connected_channels_list:
-        connected_channels_list = await get_connected_channels()
-
-@app.on_message(filters.channel) # সব চ্যানেলের মেসেজ শোনার জন্য
-async def process_channel_posts(_, msg: Message):
-    global connected_channels_list
-    # যদি মেসেজটি সংযুক্ত চ্যানেলের একটি থেকে আসে
-    if msg.chat.id in connected_channels_list:
-        text = msg.text or msg.caption
-        if not text:
-            return
-
-        movie_to_save = {
-            "message_id": msg.id,
-            "title": text,
-            "date": msg.date,
-            "year": extract_year(text),
-            "language": extract_language(text),
-            "title_clean": clean_text(text),
-            "views_count": 0,
-            "likes": 0,
-            "dislikes": 0,
-            "rated_by": [],
-            "source_chat_id": msg.chat.id # নতুন: কোন চ্যানেল থেকে মেসেজ এসেছে তা সেভ করা হয়েছে
-        }
-        
-        result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
-
-        if result.upserted_id is not None:
-            setting = settings_col.find_one({"key": "global_notify"})
-            if setting and setting.get("value"):
-                for user in users_col.find({"notify": {"$ne": False}}):
-                    try:
-                        m = await app.send_message(
-                            user["_id"],
-                            f"নতুন মুভি আপলোড হয়েছে:\n**{text.splitlines()[0][:100]}**\nএখনই সার্চ করে দেখুন!"
-                        )
-                        asyncio.create_task(delete_message_later(m.chat.id, m.id))
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
-                            print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
-                        else:
-                            print(f"Failed to send notification to user {user['_id']}: {e}")
-
+    if result.upserted_id is not None:
+        setting = settings_col.find_one({"key": "global_notify"})
+        if setting and setting.get("value"):
+            for user in users_col.find({"notify": {"$ne": False}}):
+                try:
+                    m = await app.send_message(
+                        user["_id"],
+                        f"নতুন মুভি আপলোড হয়েছে:\n**{text.splitlines()[0][:100]}**\nএখনই সার্চ করে দেখুন!"
+                    )
+                    asyncio.create_task(delete_message_later(m.chat.id, m.id))
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
+                        print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
+                    else:
+                        print(f"Failed to send notification to user {user['_id']}: {e}")
 
 @app.on_message(filters.command("start"))
 async def start(_, msg: Message):
@@ -194,41 +167,34 @@ async def start(_, msg: Message):
 
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
-        
-        movie_data = movies_col.find_one({"message_id": message_id})
-        if not movie_data:
-            error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা লোড করা যায়নি।")
-            asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-            return
-
-        # এখানে source_chat_id ব্যবহার করুন
-        source_chat_id = movie_data.get("source_chat_id", CHANNEL_ID) # যদি না থাকে, ডিফল্ট CHANNEL_ID ব্যবহার করুন
-        
         try:
+            # app.forward_messages এর পরিবর্তে app.copy_message ব্যবহার করা হয়েছে
             copied_message = await app.copy_message(
-                chat_id=msg.chat.id,
-                from_chat_id=source_chat_id, # **পরিবর্তন এখানে**
-                message_id=message_id,
-                protect_content=True
+                chat_id=msg.chat.id,        # যেখানে মেসেজটি পাঠানো হবে (ইউজারের চ্যাট)
+                from_chat_id=CHANNEL_ID,    # যেখান থেকে মেসেজটি কপি করা হবে (আপনার চ্যানেল)
+                message_id=message_id,      # মূল মেসেজের আইডি
+                protect_content=True        # কন্টেন্ট সুরক্ষা নিশ্চিত করতে
             )
             
-            likes_count = movie_data.get('likes', 0)
-            dislikes_count = movie_data.get('dislikes', 0)
-            
-            rating_buttons = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(f"👍 লাইক ({likes_count})", callback_data=f"like_{message_id}_{user_id}"),
-                    InlineKeyboardButton(f"👎 ডিসলাইক ({dislikes_count})", callback_data=f"dislike_{message_id}_{user_id}")
-                ]
-            ])
-            rating_message = await app.send_message(
-                chat_id=msg.chat.id,
-                text="মুভিটি কেমন লাগলো? রেটিং দিন:",
-                reply_markup=rating_buttons,
-                reply_to_message_id=copied_message.id
-            )
-            asyncio.create_task(delete_message_later(rating_message.chat.id, rating_message.id))
-            asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
+            movie_data = movies_col.find_one({"message_id": message_id})
+            if movie_data:
+                likes_count = movie_data.get('likes', 0)
+                dislikes_count = movie_data.get('dislikes', 0)
+                
+                rating_buttons = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(f"👍 লাইক ({likes_count})", callback_data=f"like_{message_id}_{user_id}"),
+                        InlineKeyboardButton(f"👎 ডিসলাইক ({dislikes_count})", callback_data=f"dislike_{message_id}_{user_id}")
+                    ]
+                ])
+                rating_message = await app.send_message(
+                    chat_id=msg.chat.id,
+                    text="মুভিটি কেমন লাগলো? রেটিং দিন:",
+                    reply_markup=rating_buttons,
+                    reply_to_message_id=copied_message.id # কপি করা মেসেজের আইডি ব্যবহার করা হয়েছে
+                )
+                asyncio.create_task(delete_message_later(rating_message.chat.id, rating_message.id))
+                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id)) # কপি করা মেসেজ ডিলিট করুন
 
             movies_col.update_one(
                 {"message_id": message_id},
@@ -252,43 +218,6 @@ async def start(_, msg: Message):
     ])
     start_message = await msg.reply_photo(photo=START_PIC, caption="আমাকে মুভির নাম লিখে পাঠান, আমি খুঁজে দেবো।", reply_markup=btns)
     asyncio.create_task(delete_message_later(start_message.chat.id, start_message.id))
-
-@app.on_message(filters.command("connect") & filters.user(ADMIN_IDS))
-async def connect_channel(_, msg: Message):
-    if len(msg.command) < 2:
-        error_msg = await msg.reply_text("অনুগ্রহ করে চ্যানেলের ID অথবা Username দিন।\nব্যবহার: `/connect -1001234567890` অথবা `/connect @channelusername`")
-        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-        return
-
-    target_channel_input = msg.command[1]
-    
-    try:
-        if target_channel_input.startswith("-100"):
-            target_channel_id = int(target_channel_input)
-        else:
-            chat = await app.get_chat(target_channel_input)
-            target_channel_id = chat.id
-
-        settings_col.update_one(
-            {"key": "connected_channels"},
-            {"$addToSet": {"channel_ids": target_channel_id}}, # একাধিক চ্যানেল সেভ করার জন্য
-            upsert=True
-        )
-        
-        # গ্লোবাল লিস্ট আপডেট করুন
-        global connected_channels_list
-        connected_channels_list = await get_connected_channels()
-
-        reply_msg = await msg.reply_text(f"চ্যানেল `{target_channel_id}` সফলভাবে সংযুক্ত করা হয়েছে। এখন এই চ্যানেল থেকে পোস্ট সেভ করা যাবে।")
-        asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
-
-    except ValueError:
-        error_msg = await msg.reply_text("অনুগ্রহ করে একটি সঠিক চ্যানেল ID (যেমন -100...) অথবা Username দিন।")
-        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-    except Exception as e:
-        error_msg = await msg.reply_text(f"চ্যানেল সংযুক্ত করতে সমস্যা হয়েছে: {e}")
-        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-
 
 @app.on_message(filters.command("feedback") & filters.private)
 async def feedback(_, msg: Message):
@@ -526,11 +455,10 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # সব মুভির ডেটা সংগ্রহ করুন যেখানে query_clean টাইটেলে উপস্থিত
     all_movie_data_cursor = movies_col.find(
         {"title_clean": {"$regex": query_clean, "$options": "i"}},
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(100) # শুধুমাত্র প্রথম 100টি এন্ট্রি নিন পারফরম্যান্সের জন্য
+    ).limit(100)
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -775,8 +703,6 @@ async def callback_handler(_, cq: CallbackQuery):
         else:
             await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
 
-# বট শুরু করার জন্য
-# if __name__ == "__main__":
-#     print("বট শুরু হচ্ছে...")
-#     app.run() # এটি বদলে দিন
-#     asyncio.run(main()) # এটি ব্যবহার করুন যদি আপনি Pyrogram 2.0+ ব্যবহার করেন এবং main ফাংশন ব্যবহার করতে চান
+if __name__ == "__main__":
+    print("বট শুরু হচ্ছে...")
+    app.run()
