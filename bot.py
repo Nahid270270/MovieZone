@@ -16,12 +16,15 @@ from concurrent.futures import ThreadPoolExecutor
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# CHANNEL_ID = int(os.getenv("CHANNEL_ID")) # এই ভেরিয়েবলটি এখন আর শুধু একটি চ্যানেল ID ধারণ করবে না
 RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
+
+# API_ID এবং অন্যান্য অপরিহার্য ভেরিয়েবল সেট করা হয়েছে কিনা তা পরীক্ষা করুন
+if not all([API_ID, API_HASH, BOT_TOKEN, DATABASE_URL]):
+    raise ValueError("One or more essential environment variables (API_ID, API_HASH, BOT_TOKEN, DATABASE_URL) are not set!")
 
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -118,7 +121,8 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                     corrected_suggestions.append({
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
-                        "language": movie_data["language"]
+                        "language": movie_data["language"],
+                        "views_count": movie_data.get("views_count", 0) # এখানে views_count যোগ করা হয়েছে
                     })
                     break
     return corrected_suggestions
@@ -172,32 +176,36 @@ async def get_connected_channel_ids():
     channels = connected_channels_col.find({})
     return [channel["channel_id"] for channel in channels]
 
-# This filter will dynamically fetch channel IDs from the database
-dynamic_chat_filter = filters.create(
-    "DynamicChatFilter",
-    lambda _, __, msg: asyncio.run(get_connected_channel_ids()).__contains__(msg.chat.id)
-)
+# **সমস্যা সমাধানের জন্য এখানে পরিবর্তন করা হয়েছে**
+async def dynamic_channel_check(_, __, msg: Message):
+    connected_ids = await get_connected_channel_ids()
+    return msg.chat.id in connected_ids
+
+dynamic_chat_filter = filters.create("DynamicChatFilter", dynamic_channel_check)
 
 @app.on_message(dynamic_chat_filter) # dynamic_chat_filter ব্যবহার করা হয়েছে
 async def save_post(_, msg: Message):
-    if msg.chat.id not in ADMIN_IDS: # Admin's private chat is not a connected channel for saving posts this way
-        status = await save_movie_to_db(msg)
-        if status == "inserted":
-            setting = settings_col.find_one({"key": "global_notify"})
-            if setting and setting.get("value"):
-                for user in users_col.find({"notify": {"$ne": False}}):
-                    try:
-                        m = await app.send_message(
-                            user["_id"],
-                            f"নতুন মুভি আপলোড হয়েছে:\n**{msg.text.splitlines()[0][:100]}**\nএখনই সার্চ করে দেখুন!"
-                        )
-                        asyncio.create_task(delete_message_later(m.chat.id, m.id))
-                        await asyncio.sleep(0.05)
-                    except Exception as e:
-                        if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
-                            print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
-                        else:
-                            print(f"Failed to send notification to user {user['_id']}: {e}")
+    # এটি নিশ্চিত করতে যে এটি শুধুমাত্র বটের সংযুক্ত চ্যানেলে কাজ করে, অ্যাডমিনের প্রাইভেট চ্যাটে নয়
+    if msg.chat.type == "private" and msg.chat.id in ADMIN_IDS:
+        return
+
+    status = await save_movie_to_db(msg)
+    if status == "inserted":
+        setting = settings_col.find_one({"key": "global_notify"})
+        if setting and setting.get("value"):
+            for user in users_col.find({"notify": {"$ne": False}}):
+                try:
+                    m = await app.send_message(
+                        user["_id"],
+                        f"নতুন মুভি আপলোড হয়েছে:\n**{msg.text.splitlines()[0][:100]}**\nএখনই সার্চ করে দেখুন!"
+                    )
+                    asyncio.create_task(delete_message_later(m.chat.id, m.id))
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e):
+                        print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
+                    else:
+                        print(f"Failed to send notification to user {user['_id']}: {e}")
 
 
 @app.on_message(filters.command("start"))
@@ -499,7 +507,11 @@ async def search(_, msg: Message):
     ).limit(RESULTS_COUNT))
 
     if matched_movies_direct:
-        await loading_message.delete()
+        try:
+            await loading_message.delete()
+        except Exception as e:
+            print(f"Error deleting loading message: {e}")
+
         buttons = []
         for movie in matched_movies_direct:
             buttons.append([
@@ -529,7 +541,10 @@ async def search(_, msg: Message):
         RESULTS_COUNT
     )
 
-    await loading_message.delete()
+    try:
+        await loading_message.delete()
+    except Exception as e:
+        print(f"Error deleting loading message: {e}")
 
     if corrected_suggestions:
         buttons = []
@@ -701,6 +716,7 @@ async def callback_handler(_, cq: CallbackQuery):
         movie_message_id = int(message_id_str)
         user_id = int(user_id_str)
 
+        # এখানে channel_id বাদ দেওয়া হয়েছে কারণ movie_data থেকে এটি লোড হবে
         movie = movies_col.find_one({"message_id": movie_message_id})
 
         if not movie:
@@ -848,14 +864,15 @@ async def connect_channel(_, msg: Message):
                     imported_count += 1
             await asyncio.sleep(0.01) # Small delay to avoid FloodWait
 
-    except FloodWait as e:
-        flood_wait_msg = await msg.reply(f"FloodWait এর কারণে ইম্পোর্ট থামানো হয়েছে: {e.value} সেকেন্ড অপেক্ষা করুন।")
-        asyncio.create_task(delete_message_later(flood_wait_msg.chat.id, flood_wait_msg.id))
-        await asyncio.sleep(e.value)
-        # You might want to resume from where it left off, but for simplicity, we'll just report what was done.
-    except Exception as e:
-        error_import_msg = await msg.reply(f"ইম্পোর্ট করার সময় একটি এরর হয়েছে: {e}")
-        asyncio.create_task(delete_message_later(error_import_msg.chat.id, error_import_msg.id))
+    except Exception as e: # pyrogram.errors.FloodWait সহ সব এরর এখানে ধরা হবে
+        if "FloodWait" in str(e):
+            wait_time = int(re.search(r'(\d+)', str(e)).group(1)) if re.search(r'(\d+)', str(e)) else 10 # Default to 10 seconds
+            flood_wait_msg = await msg.reply(f"FloodWait এর কারণে ইম্পোর্ট থামানো হয়েছে: {wait_time} সেকেন্ড অপেক্ষা করুন।")
+            asyncio.create_task(delete_message_later(flood_wait_msg.chat.id, flood_wait_msg.id))
+            await asyncio.sleep(wait_time)
+        else:
+            error_import_msg = await msg.reply(f"ইম্পোর্ট করার সময় একটি এরর হয়েছে: {e}")
+            asyncio.create_task(delete_message_later(error_import_msg.chat.id, error_import_msg.id))
 
     finally:
         final_import_msg = await msg.reply(f"চ্যানেল `{channel_id}` থেকে `{imported_count}` টি মুভি সফলভাবে ইম্পোর্ট/আপডেট করা হয়েছে।")
