@@ -1,6 +1,6 @@
-pyrogram
-pymongo
-Flask
-fuzzywuzzy
-python-Levenshtein
+pyrogram>=2.0.100
+pymongo>=4.0
+Flask>=2.0
+python-Levenshtein>=0.12 # fuzzywuzzy এর জন্য প্রয়োজনীয়
+fuzzywuzzy>=0.18.0
 tgcrypto
