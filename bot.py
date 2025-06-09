@@ -122,8 +122,8 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
                         "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0), # views_count যোগ করা হয়েছে
-                        "source_channel_id": movie_data["source_channel_id"] # source_channel_id যোগ করা হয়েছে
+                        "views_count": movie_data.get("views_count", 0),
+                        "source_channel_id": movie_data["source_channel_id"]
                     })
                     break
     return corrected_suggestions
@@ -137,11 +137,6 @@ async def process_and_save_message(msg: Message, source_channel_id: int):
     text = msg.text or msg.caption
     if not text:
         return
-
-    # Check if the message contains any recognizable movie title pattern (optional but can filter noise)
-    # For example, if you expect "Movie Name (Year)" or similar.
-    # if not re.search(r'\b\w+\b', text): # Very basic check for any word character
-    #     return
 
     movie_to_save = {
         "message_id": msg.id,
@@ -200,9 +195,6 @@ async def sync_channels():
 
             print(f"Attempting to sync channel {channel_id} from message_id {last_synced_message_id}...")
             try:
-                # Fetch new messages from the channel
-                # Using get_history with offset_id and reverse=True ensures we get messages newer than last_synced_message_id
-                # and in ascending order (older to newer)
                 new_messages_count = 0
                 temp_last_synced_id = last_synced_message_id
 
@@ -231,15 +223,12 @@ async def sync_channels():
                         {"$set": {"is_active": False, "status_note": f"Deactivated due to error: {e}"}}
                     )
                 elif "MESSAGE_ID_INVALID" in str(e) and last_synced_message_id == 0:
-                    # If offset_id is 0 and it's invalid, it might mean the channel has no messages
-                    # or it's a very old/deleted channel. We can skip or mark it as inactive.
                     print(f"Channel {channel_id} has no messages or invalid message_id 0. Setting last_synced_message_id to 1 to proceed.")
                     connected_channels_col.update_one(
                         {"channel_id": channel_id},
-                        {"$set": {"last_synced_message_id": 1}} # Set to 1 to avoid re-checking 0
+                        {"$set": {"last_synced_message_id": 1}}
                     )
                 else:
-                    # General error, log and continue
                     pass
             await asyncio.sleep(10) # Delay between processing each connected channel
 
@@ -259,9 +248,10 @@ async def start(_, msg: Message):
     user_id = msg.from_user.id
     current_time = datetime.now(UTC)
 
+    # Rate limiting for /start command
     if user_id in user_last_start_time:
         time_since_last_start = current_time - user_last_start_time[user_id]
-        if time_since_last_start < timedelta(seconds=5):
+        if time_since_last_start < timedelta(seconds=3): # 3 second cooldown
             print(f"User {user_id} sent /start too quickly. Ignoring.")
             return
 
@@ -278,12 +268,11 @@ async def start(_, msg: Message):
         source_channel_id = int(parts[1])
 
         try:
-            # app.forward_messages এর পরিবর্তে app.copy_message ব্যবহার করা হয়েছে
             copied_message = await app.copy_message(
-                chat_id=msg.chat.id,        # যেখানে মেসেজটি পাঠানো হবে (ইউজারের চ্যাট)
-                from_chat_id=source_channel_id,    # যেখান থেকে মেসেজটি কপি করা হবে (সোর্স চ্যানেল)
-                message_id=message_id,      # মূল মেসেজের আইডি
-                protect_content=True        # কন্টেন্ট সুরক্ষা নিশ্চিত করতে
+                chat_id=msg.chat.id,
+                from_chat_id=source_channel_id,
+                message_id=message_id,
+                protect_content=True
             )
             
             movie_data = movies_col.find_one({"message_id": message_id, "source_channel_id": source_channel_id})
@@ -301,10 +290,10 @@ async def start(_, msg: Message):
                     chat_id=msg.chat.id,
                     text="মুভিটি কেমন লাগলো? রেটিং দিন:",
                     reply_markup=rating_buttons,
-                    reply_to_message_id=copied_message.id # কপি করা মেসেজের আইডি ব্যবহার করা হয়েছে
+                    reply_to_message_id=copied_message.id
                 )
                 asyncio.create_task(delete_message_later(rating_message.chat.id, rating_message.id))
-                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id)) # কপি করা মেসেজ ডিলিট করুন
+                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
 
             movies_col.update_one(
                 {"message_id": message_id, "source_channel_id": source_channel_id},
@@ -400,10 +389,8 @@ async def delete_specific_movie(_, msg: Message):
     
     movie_title_to_delete = msg.text.split(None, 1)[1].strip()
     
-    # Try direct match first
     movie_to_delete = movies_col.find_one({"title": {"$regex": re.escape(movie_title_to_delete), "$options": "i"}})
 
-    # If not found by direct match, try clean title match
     if not movie_to_delete:
         cleaned_title_to_delete = clean_text(movie_title_to_delete)
         movie_to_delete = movies_col.find_one({"title_clean": {"$regex": f"^{re.escape(cleaned_title_to_delete)}$", "$options": "i"}})
@@ -473,8 +460,13 @@ async def connect_channel(_, msg: Message):
         asyncio.create_task(delete_message_later(success_msg.chat.id, success_msg.id))
 
     except Exception as e:
-        error_msg = await msg.reply(f"চ্যানেল সংযোগ করতে সমস্যা হয়েছে: {e}\n"
-                                     "নিশ্চিত করুন বট চ্যানেলের অ্যাডমিন এবং চ্যানেল আইডি সঠিক।")
+        error_msg_text = f"চ্যানেল সংযোগ করতে সমস্যা হয়েছে: {e}\n"
+        if "CHAT_ID_INVALID" in str(e) or "PEER_ID_INVALID" in str(e):
+            error_msg_text = f"ভুল চ্যানেল আইডি। নিশ্চিত করুন আইডি সঠিক এবং বট চ্যানেলের সদস্য।: {e}"
+        elif "CHANNEL_PRIVATE" in str(e):
+            error_msg_text = f"চ্যানেলটি ব্যক্তিগত। নিশ্চিত করুন বটকে অ্যাডমিন হিসেবে যোগ করা হয়েছে।: {e}"
+        
+        error_msg = await msg.reply(error_msg_text)
         asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         print(f"Error connecting channel {channel_id}: {e}")
 
@@ -492,14 +484,13 @@ async def disconnect_channel(_, msg: Message):
         asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return
     
-    # নিশ্চিতকরণের জন্য বাটন যোগ করুন
     confirm_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("হ্যাঁ, ডিসকানেক্ট করুন", callback_data=f"confirm_disconnect_{channel_id}")],
         [InlineKeyboardButton("না, বাতিল করুন", callback_data=f"cancel_disconnect_{channel_id}")]
     ])
 
     reply_msg = await msg.reply(f"আপনি কি নিশ্চিত যে আপনি চ্যানেল `{channel_id}` ডিসকানেক্ট করতে চান?", reply_markup=confirm_markup)
-    asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id, delay=60)) # 60 সেকেন্ড পর ডিলিট হবে
+    asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id, delay=60))
 
 @app.on_message(filters.command("list_connected") & filters.user(ADMIN_IDS))
 async def list_connected_channels(_, msg: Message):
@@ -509,7 +500,7 @@ async def list_connected_channels(_, msg: Message):
         asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
         return
 
-    list_text = "🔗 সংযুক্ত চ্যানেলসমূহ:\n\n"
+    list_text = "🔗 **সংযুক্ত চ্যানেলসমূহ:**\n\n"
     for ch in connected_channels:
         list_text += f"**নাম:** {ch.get('channel_name', 'N/A')}\n"
         list_text += f"**আইডি:** `{ch['channel_id']}`\n"
@@ -541,7 +532,6 @@ async def handle_admin_reply(_, cq: CallbackQuery):
         m_sent = await app.send_message(user_id, messages[reason])
         asyncio.create_task(delete_message_later(m_sent.chat.id, m_sent.id))
         await cq.answer("ব্যবহারকারীকে জানানো হয়েছে ✅", show_alert=True)
-        # Edit the admin's original message to mark it as responded
         await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton(f"✅ উত্তর দেওয়া হয়েছে: {messages[reason].split(' ')[0]}", callback_data="noop")
         ]]))
@@ -640,11 +630,9 @@ async def search(_, msg: Message):
     )
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...", quote=True)
-    asyncio.create_task(delete_message_later(loading_message.chat.id, loading_message.id))
-
+    
     query_clean = clean_text(query)
     
-    # Direct match first (optimized for exact or near-exact matches)
     matched_movies_direct = list(movies_col.find(
         {"$or": [
             {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}},
@@ -653,7 +641,11 @@ async def search(_, msg: Message):
     ).limit(RESULTS_COUNT))
 
     if matched_movies_direct:
-        await loading_message.delete()
+        try:
+            await loading_message.delete()
+        except Exception as e:
+            print(f"Could not delete loading message: {e}")
+
         buttons = []
         for movie in matched_movies_direct:
             if "title" in movie and "message_id" in movie and "source_channel_id" in movie:
@@ -668,13 +660,10 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
-    # If no direct match, try fuzzy search
-    # Fetch all relevant movie data for fuzzy matching
-    # Only fetch necessary fields to reduce memory usage for large datasets
     all_movie_data_cursor = movies_col.find(
-        {"title_clean": {"$regex": query_clean, "$options": "i"}}, # Pre-filter by clean title for efficiency
+        {"title_clean": {"$regex": query_clean, "$options": "i"}},
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1, "source_channel_id": 1}
-    ).limit(200) # Limit the number of documents to fetch for fuzzy search
+    ).limit(200)
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -687,7 +676,10 @@ async def search(_, msg: Message):
         RESULTS_COUNT
     )
 
-    await loading_message.delete()
+    try:
+        await loading_message.delete()
+    except Exception as e:
+        print(f"Could not delete loading message: {e}")
 
     if corrected_suggestions:
         buttons = []
@@ -773,8 +765,6 @@ async def callback_handler(_, cq: CallbackQuery):
         result = connected_channels_col.delete_one({"channel_id": channel_id})
         if result.deleted_count > 0:
             success_msg = await cq.message.edit_text(f"চ্যানেল `{channel_id}` সফলভাবে ডিসকানেক্ট করা হয়েছে।")
-            # Optionally, delete movies from this source_channel_id
-            # movies_col.delete_many({"source_channel_id": channel_id})
             asyncio.create_task(delete_message_later(success_msg.chat.id, success_msg.id))
         else:
             error_msg = await cq.message.edit_text(f"চ্যানেল `{channel_id}` সংযুক্ত ছিল না।")
@@ -861,7 +851,6 @@ async def callback_handler(_, cq: CallbackQuery):
                 print(f"Could not notify admin {admin_id} about request from callback: {e}")
         
         try:
-            # Edit the user's message to confirm the request and remove the buttons
             edited_msg = await cq.message.edit_text(
                 f"❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।\n\n"
                 f"আপনার অনুরোধ **'{movie_name}'** জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।",
@@ -872,9 +861,8 @@ async def callback_handler(_, cq: CallbackQuery):
             print(f"Error editing user message after request: {e}")
 
     elif data.startswith("like_") or data.startswith("dislike_"):
-        # Expecting callback_data like "like_{message_id}_{source_channel_id}_{user_id}"
         parts = data.split("_", 3)
-        if len(parts) < 4: # Ensure all parts are present
+        if len(parts) < 4:
             await cq.answer("অকার্যকর রেটিং ডেটা।", show_alert=True)
             return
 
@@ -907,8 +895,8 @@ async def callback_handler(_, cq: CallbackQuery):
 
         new_rating_buttons = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton(f"👍 লাইক ({updated_likes})", callback_data="noop"), # noop to prevent re-rating
-                InlineKeyboardButton(f"👎 ডিসলাইক ({updated_dislikes})", callback_data="noop") # noop to prevent re-rating
+                InlineKeyboardButton(f"👍 লাইক ({updated_likes})", callback_data="noop"),
+                InlineKeyboardButton(f"👎 ডিসলাইক ({updated_dislikes})", callback_data="noop")
             ]
         ])
 
@@ -920,7 +908,6 @@ async def callback_handler(_, cq: CallbackQuery):
             await cq.answer("রেটিং আপডেট করতে সমস্যা হয়েছে।", show_alert=True)
 
     elif "_" in data:
-        # Generic fallback for other complex callback data, if any
         parts = data.split("_", 3)
         if len(parts) == 4 and parts[0] in ["has", "no", "soon", "wrong"]: 
             action, uid, mid, raw_query = parts
@@ -941,11 +928,9 @@ async def callback_handler(_, cq: CallbackQuery):
                     print(f"Error sending admin feedback message: {e}")
             else:
                 await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
-        else:
-            await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
     
-    elif data == "noop": # No-operation callback data
-        await cq.answer() # Simply acknowledge without doing anything further
+    elif data == "noop":
+        await cq.answer()
 
 
 if __name__ == "__main__":
