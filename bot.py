@@ -1,33 +1,28 @@
-import os
-import re
-import asyncio
-import urllib.parse
-from datetime import datetime, UTC, timedelta
-from threading import Thread
-from concurrent.futures import ThreadPoolExecutor
-from fuzzywuzzy import process
-
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import OperationFailure, CollectionInvalid, DuplicateKeyError
 from flask import Flask
-
+from threading import Thread
+import os
+import re
+from datetime import datetime, UTC, timedelta 
+import asyncio
+import urllib.parse
+from fuzzywuzzy import process
+from concurrent.futures import ThreadPoolExecutor
+from pyrogram import idle # pyrogram 2.0+ এর জন্য এটি দরকার
 
 # Configs - নিশ্চিত করুন এই ভেরিয়েবলগুলো আপনার এনভায়রনমেন্টে সেট করা আছে।
-# IMPORTANT: API_ID, API_HASH, BOT_TOKEN, DATABASE_URL MUST be set.
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID")) # এটি আপনার প্রধান চ্যানেল আইডি
 RESULTS_COUNT = int(os.getenv("RESULTS_COUNT", 10))
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
 DATABASE_URL = os.getenv("DATABASE_URL")
 UPDATE_CHANNEL = os.getenv("UPDATE_CHANNEL", "https://t.me/CTGMovieOfficial")
 START_PIC = os.getenv("START_PIC", "https://i.ibb.co/prnGXMr3/photo-2025-05-16-05-15-45-7504908428624527364.jpg")
-
-# Essential variable check before proceeding
-if not all([API_ID, API_HASH, BOT_TOKEN, DATABASE_URL]):
-    raise ValueError("One or more essential environment variables (API_ID, API_HASH, BOT_TOKEN, DATABASE_URL) are not set! Please check your Render environment variables.")
 
 app = Client("movie_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -40,11 +35,10 @@ stats_col = db["stats"]
 users_col = db["users"]
 settings_col = db["settings"]
 requests_col = db["requests"]
-connected_channels_col = db["connected_channels"]
 
 # Indexing - Optimized for faster search
 try:
-    movies_col.drop_index("message_id_1") # Attempt to drop old index if it exists
+    movies_col.drop_index("message_id_1")
     print("Existing 'message_id_1' index dropped successfully (if it existed).")
 except Exception as e:
     if "index not found" not in str(e):
@@ -53,13 +47,13 @@ except Exception as e:
         print("'message_id_1' index not found, proceeding with creation.")
 
 try:
-    movies_col.create_index([("message_id", ASCENDING), ("channel_id", ASCENDING)], unique=True, background=True)
-    print("Composite index 'message_id_channel_id' (unique) ensured successfully.")
+    movies_col.create_index("message_id", unique=True, background=True)
+    print("Index 'message_id' (unique) ensured successfully.")
 except DuplicateKeyError as e:
-    print(f"Error: Cannot create unique index on 'message_id' and 'channel_id' due to duplicate entries. "
+    print(f"Error: Cannot create unique index on 'message_id' due to duplicate entries. "
           f"Please clean your database manually if this persists. Error: {e}")
 except OperationFailure as e:
-    print(f"Error creating composite index: {e}")
+    print(f"Error creating index 'message_id': {e}")
 
 movies_col.create_index("language", background=True)
 movies_col.create_index([("title_clean", ASCENDING)], background=True)
@@ -67,22 +61,12 @@ movies_col.create_index([("language", ASCENDING), ("title_clean", ASCENDING)], b
 movies_col.create_index([("views_count", ASCENDING)], background=True)
 print("All other necessary indexes ensured successfully.")
 
-# Connected channels collection indexing
-try:
-    connected_channels_col.create_index("channel_id", unique=True, background=True)
-    print("Index 'channel_id' for connected_channels ensured successfully.")
-except DuplicateKeyError as e:
-    print(f"Error: Cannot create unique index on 'channel_id' for connected_channels due to duplicate entries. Error: {e}")
-except OperationFailure as e:
-    print(f"Error creating index 'channel_id' for connected_channels: {e}")
-
-
 # Flask App for health check
 flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     return "Bot is running!"
-Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start()
+Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start() 
 
 # Initialize a global ThreadPoolExecutor for running blocking functions (like fuzzywuzzy)
 thread_pool_executor = ThreadPoolExecutor(max_workers=5)
@@ -99,7 +83,7 @@ def extract_year(text):
     match = re.search(r'\b(19|20)\d{2}\b', text)
     return int(match.group(0)) if match else None
 
-async def delete_message_later(chat_id, message_id, delay=300): # Default delay 300 seconds (5 minutes)
+async def delete_message_later(chat_id, message_id, delay=300): # ডিলে 300 সেকেন্ড (5 মিনিট) সেট করা হয়েছে
     await asyncio.sleep(delay)
     try:
         await app.delete_messages(chat_id, message_id)
@@ -112,7 +96,7 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
         return []
 
     choices = [item["title_clean"] for item in all_movie_titles_data]
-
+    
     matches_raw = process.extract(query_clean, choices, limit=limit)
 
     corrected_suggestions = []
@@ -120,95 +104,79 @@ def find_corrected_matches(query_clean, all_movie_titles_data, score_cutoff=70, 
         if score >= score_cutoff:
             for movie_data in all_movie_titles_data:
                 if movie_data["title_clean"] == matched_clean_title:
-                    corrected_suggestions.append({
+                    # 'views_count' যদি থাকে তাহলে যোগ করুন
+                    movie_data_to_add = {
                         "title": movie_data["original_title"],
                         "message_id": movie_data["message_id"],
-                        "language": movie_data["language"],
-                        "views_count": movie_data.get("views_count", 0)
-                    })
+                        "language": movie_data["language"]
+                    }
+                    if "views_count" in movie_data:
+                        movie_data_to_add["views_count"] = movie_data["views_count"]
+                    corrected_suggestions.append(movie_data_to_add)
                     break
     return corrected_suggestions
 
 # Global dictionary to keep track of last start command time per user
 user_last_start_time = {}
 
-# save_movie_to_db helper function (for use in both save_post and connect)
-async def save_movie_to_db(msg: Message):
-    text = msg.text or msg.caption
-    if not text:
-        return None
+# সংযুক্ত চ্যানেলগুলো লোড করার জন্য একটি ফাংশন যোগ করা হয়েছে।
+async def get_connected_channels():
+    connected_channels_doc = settings_col.find_one({"key": "connected_channels"})
+    if connected_channels_doc and "channel_ids" in connected_channels_doc:
+        return connected_channels_doc["channel_ids"]
+    return [CHANNEL_ID] # ডিফল্ট হিসেবে আপনার প্রধান চ্যানেল আইডি থাকবে
 
-    movie_to_save = {
-        "message_id": msg.id,
-        "channel_id": msg.chat.id,
-        "title": text,
-        "date": msg.date,
-        "year": extract_year(text),
-        "language": extract_language(text),
-        "title_clean": clean_text(text),
-        "views_count": 0,
-        "likes": 0,
-        "dislikes": 0,
-        "rated_by": []
-    }
+# বট চালু হওয়ার সময় একবার সংযুক্ত চ্যানেলগুলো লোড করার জন্য গ্লোবাল ভেরিয়েবল।
+connected_channels_list = []
 
-    try:
-        result = movies_col.update_one(
-            {"message_id": msg.id, "channel_id": msg.chat.id},
-            {"$set": movie_to_save},
-            upsert=True
-        )
-        if result.upserted_id:
-            return "inserted"
-        elif result.modified_count:
-            return "updated"
-        else:
-            return "unchanged"
-    except DuplicateKeyError:
-        print(f"Skipping duplicate: Message ID {msg.id} from channel {msg.chat.id} already exists.")
-        return "duplicate"
-    except Exception as e:
-        print(f"Error saving message {msg.id} from channel {msg.chat.id} to DB: {e}")
-        return "error"
+# নিশ্চিত করুন যে বট শুরু হওয়ার সময় connected_channels_list লোড হয়
+@app.on_raw_update()
+async def _(client, update, users, chats):
+    global connected_channels_list
+    if not connected_channels_list:
+        connected_channels_list = await get_connected_channels()
 
+@app.on_message(filters.channel) # সব চ্যানেলের মেসেজ শোনার জন্য
+async def process_channel_posts(_, msg: Message):
+    global connected_channels_list
+    # যদি মেসেজটি সংযুক্ত চ্যানেলের একটি থেকে আসে
+    if msg.chat.id in connected_channels_list:
+        text = msg.text or msg.caption
+        if not text:
+            return
 
-# dynamic_chat_filter logic
-async def dynamic_channel_check(filter_instance, client_instance, msg: Message):
-    # Only process messages from channels/supergroups
-    if msg.chat.type not in ["channel", "supergroup"]:
-        return False
-    connected_ids = await get_connected_channel_ids()
-    return msg.chat.id in connected_ids
+        movie_to_save = {
+            "message_id": msg.id,
+            "title": text,
+            "date": msg.date,
+            "year": extract_year(text),
+            "language": extract_language(text),
+            "title_clean": clean_text(text),
+            "views_count": 0,
+            "likes": 0,
+            "dislikes": 0,
+            "rated_by": [],
+            "source_chat_id": msg.chat.id # নতুন: কোন চ্যানেল থেকে মেসেজ এসেছে তা সেভ করা হয়েছে
+        }
+        
+        result = movies_col.update_one({"message_id": msg.id}, {"$set": movie_to_save}, upsert=True)
 
-async def get_connected_channel_ids():
-    channels = connected_channels_col.find({})
-    return [channel["channel_id"] for channel in channels]
-
-# Register the dynamic filter
-dynamic_chat_filter = filters.create(dynamic_channel_check, "DynamicChatFilter")
-
-
-@app.on_message(dynamic_chat_filter) # Use the dynamic filter here
-async def save_post(_, msg: Message):
-    # This handler specifically for saving posts from connected channels
-    # No need to check msg.chat.type or ADMIN_IDS here as the filter already handles it
-    status = await save_movie_to_db(msg)
-    if status == "inserted":
-        setting = settings_col.find_one({"key": "global_notify"})
-        if setting and setting.get("value"):
-            for user in users_col.find({"notify": {"$ne": False}}):
-                try:
-                    m = await app.send_message(
-                        user["_id"],
-                        f"নতুন মুভি আপলোড হয়েছে:\n**{msg.text.splitlines()[0][:100]}**\nএখনই সার্চ করে দেখুন!"
-                    )
-                    asyncio.create_task(delete_message_later(m.chat.id, m.id))
-                    await asyncio.sleep(0.05)
-                except Exception as e:
-                    if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e) or "USER_BLOCKED_BOT" in str(e):
-                        print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
-                    else:
-                        print(f"Failed to send notification to user {user['_id']}: {e}")
+        if result.upserted_id is not None:
+            setting = settings_col.find_one({"key": "global_notify"})
+            if setting and setting.get("value"):
+                for user in users_col.find({"notify": {"$ne": False}}):
+                    try:
+                        m = await app.send_message(
+                            user["_id"],
+                            f"নতুন মুভি আপলোড হয়েছে:\n**{text.splitlines()[0][:100]}**\nএখনই সার্চ করে দেখুন!"
+                        )
+                        asyncio.create_task(delete_message_later(m.chat.id, m.id))
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        if "PEER_ID_INVALID" in str(e) or "USER_IS_BOT" in str(e) or "USER_DEACTIVATED_REQUIRED" in str(e):
+                            print(f"Skipping notification to invalid/blocked user {user['_id']}: {e}")
+                        else:
+                            print(f"Failed to send notification to user {user['_id']}: {e}")
 
 
 @app.on_message(filters.command("start"))
@@ -216,10 +184,9 @@ async def start(_, msg: Message):
     user_id = msg.from_user.id
     current_time = datetime.now(UTC)
 
-    # Cooldown for /start command to prevent spamming
     if user_id in user_last_start_time:
         time_since_last_start = current_time - user_last_start_time[user_id]
-        if time_since_last_start < timedelta(seconds=3): # 3 seconds cooldown
+        if time_since_last_start < timedelta(seconds=5):
             print(f"User {user_id} sent /start too quickly. Ignoring.")
             return
 
@@ -227,26 +194,27 @@ async def start(_, msg: Message):
 
     if len(msg.command) > 1 and msg.command[1].startswith("watch_"):
         message_id = int(msg.command[1].replace("watch_", ""))
+        
         movie_data = movies_col.find_one({"message_id": message_id})
-
-        if not movie_data or "channel_id" not in movie_data:
-            error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা লোড করা যায়নি। (ডেটা অসম্পূর্ণ)")
+        if not movie_data:
+            error_msg = await msg.reply_text("মুভিটি খুঁজে পাওয়া যায়নি বা লোড করা যায়নি।")
             asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-            print(f"Movie data for message_id {message_id} is incomplete or not found.")
             return
 
-        target_channel_id = movie_data["channel_id"]
+        # এখানে source_chat_id ব্যবহার করুন
+        source_chat_id = movie_data.get("source_chat_id", CHANNEL_ID) # যদি না থাকে, ডিফল্ট CHANNEL_ID ব্যবহার করুন
+        
         try:
             copied_message = await app.copy_message(
                 chat_id=msg.chat.id,
-                from_chat_id=target_channel_id,
+                from_chat_id=source_chat_id, # **পরিবর্তন এখানে**
                 message_id=message_id,
                 protect_content=True
             )
-
+            
             likes_count = movie_data.get('likes', 0)
             dislikes_count = movie_data.get('dislikes', 0)
-
+            
             rating_buttons = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(f"👍 লাইক ({likes_count})", callback_data=f"like_{message_id}_{user_id}"),
@@ -263,7 +231,7 @@ async def start(_, msg: Message):
             asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
 
             movies_col.update_one(
-                {"message_id": message_id, "channel_id": target_channel_id},
+                {"message_id": message_id},
                 {"$inc": {"views_count": 1}}
             )
 
@@ -284,6 +252,43 @@ async def start(_, msg: Message):
     ])
     start_message = await msg.reply_photo(photo=START_PIC, caption="আমাকে মুভির নাম লিখে পাঠান, আমি খুঁজে দেবো।", reply_markup=btns)
     asyncio.create_task(delete_message_later(start_message.chat.id, start_message.id))
+
+@app.on_message(filters.command("connect") & filters.user(ADMIN_IDS))
+async def connect_channel(_, msg: Message):
+    if len(msg.command) < 2:
+        error_msg = await msg.reply_text("অনুগ্রহ করে চ্যানেলের ID অথবা Username দিন।\nব্যবহার: `/connect -1001234567890` অথবা `/connect @channelusername`")
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
+        return
+
+    target_channel_input = msg.command[1]
+    
+    try:
+        if target_channel_input.startswith("-100"):
+            target_channel_id = int(target_channel_input)
+        else:
+            chat = await app.get_chat(target_channel_input)
+            target_channel_id = chat.id
+
+        settings_col.update_one(
+            {"key": "connected_channels"},
+            {"$addToSet": {"channel_ids": target_channel_id}}, # একাধিক চ্যানেল সেভ করার জন্য
+            upsert=True
+        )
+        
+        # গ্লোবাল লিস্ট আপডেট করুন
+        global connected_channels_list
+        connected_channels_list = await get_connected_channels()
+
+        reply_msg = await msg.reply_text(f"চ্যানেল `{target_channel_id}` সফলভাবে সংযুক্ত করা হয়েছে। এখন এই চ্যানেল থেকে পোস্ট সেভ করা যাবে।")
+        asyncio.create_task(delete_message_later(reply_msg.chat.id, reply_msg.id))
+
+    except ValueError:
+        error_msg = await msg.reply_text("অনুগ্রহ করে একটি সঠিক চ্যানেল ID (যেমন -100...) অথবা Username দিন।")
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
+    except Exception as e:
+        error_msg = await msg.reply_text(f"চ্যানেল সংযুক্ত করতে সমস্যা হয়েছে: {e}")
+        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
+
 
 @app.on_message(filters.command("feedback") & filters.private)
 async def feedback(_, msg: Message):
@@ -352,13 +357,11 @@ async def delete_specific_movie(_, msg: Message):
         error_msg = await msg.reply("অনুগ্রহ করে মুভির টাইটেল দিন। ব্যবহার: `/delete_movie <মুভির টাইটেল>`")
         asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return
-
+    
     movie_title_to_delete = msg.text.split(None, 1)[1].strip()
-
-    # Search by exact title first
+    
     movie_to_delete = movies_col.find_one({"title": {"$regex": re.escape(movie_title_to_delete), "$options": "i"}})
 
-    # If not found by exact title, try cleaned title
     if not movie_to_delete:
         cleaned_title_to_delete = clean_text(movie_title_to_delete)
         movie_to_delete = movies_col.find_one({"title_clean": {"$regex": f"^{re.escape(cleaned_title_to_delete)}$", "$options": "i"}})
@@ -422,7 +425,7 @@ async def popular_movies(_, msg: Message):
                         url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                     )
                 ])
-
+        
         reply_markup = InlineKeyboardMarkup(buttons)
         m = await msg.reply_text(
             "🔥 বর্তমানে সবচেয়ে জনপ্রিয় মুভিগুলো:\n\n",
@@ -440,7 +443,7 @@ async def request_movie(_, msg: Message):
         error_msg = await msg.reply("অনুগ্রহ করে /request এর পর মুভির নাম লিখুন। উদাহরণ: `/request The Creator`", quote=True)
         asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
         return
-
+    
     movie_name = msg.text.split(None, 1)[1].strip()
     user_id = msg.from_user.id
     username = msg.from_user.username or msg.from_user.first_name
@@ -481,18 +484,12 @@ async def search(_, msg: Message):
     if not query:
         return
 
-    # Skip search if message is from a connected channel (handled by save_post)
-    connected_ids = await get_connected_channel_ids()
-    if msg.chat.type in ["channel", "supergroup"] and msg.chat.id in connected_ids:
-        return
-
-    # Specific checks for group chats to reduce unnecessary processing
     if msg.chat.type == "group":
-        if len(query) < 3: # Minimum 3 characters for group search
+        if len(query) < 3:
             return
-        if msg.reply_to_message or msg.from_user.is_bot: # Ignore replies or bot messages
+        if msg.reply_to_message or msg.from_user.is_bot:
             return
-        if not re.search(r'[a-zA-Z0-9]', query): # Ignore messages without alphanumeric characters
+        if not re.search(r'[a-zA-Z0-9]', query):
             return
 
     user_id = msg.from_user.id
@@ -503,11 +500,10 @@ async def search(_, msg: Message):
     )
 
     loading_message = await msg.reply("🔎 লোড হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...", quote=True)
-    asyncio.create_task(delete_message_later(loading_message.chat.id, loading_message.id, delay=15)) # Shorter delay for loading message
+    asyncio.create_task(delete_message_later(loading_message.chat.id, loading_message.id))
 
     query_clean = clean_text(query)
-
-    # Search for all movies, regardless of channel_id for user search
+    
     matched_movies_direct = list(movies_col.find(
         {"$or": [
             {"title_clean": {"$regex": f"^{re.escape(query_clean)}", "$options": "i"}},
@@ -516,11 +512,7 @@ async def search(_, msg: Message):
     ).limit(RESULTS_COUNT))
 
     if matched_movies_direct:
-        try:
-            await loading_message.delete()
-        except Exception as e:
-            print(f"Error deleting loading message: {e}")
-
+        await loading_message.delete()
         buttons = []
         for movie in matched_movies_direct:
             buttons.append([
@@ -529,15 +521,16 @@ async def search(_, msg: Message):
                     url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                 )
             ])
-
+        
         m = await msg.reply("🎬 নিচের রেজাল্টগুলো পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
         return
 
+    # সব মুভির ডেটা সংগ্রহ করুন যেখানে query_clean টাইটেলে উপস্থিত
     all_movie_data_cursor = movies_col.find(
         {"title_clean": {"$regex": query_clean, "$options": "i"}},
         {"title_clean": 1, "original_title": "$title", "message_id": 1, "language": 1, "views_count": 1}
-    ).limit(100) # Limit for fuzzy search candidates
+    ).limit(100) # শুধুমাত্র প্রথম 100টি এন্ট্রি নিন পারফরম্যান্সের জন্য
 
     all_movie_data = list(all_movie_data_cursor)
 
@@ -550,10 +543,7 @@ async def search(_, msg: Message):
         RESULTS_COUNT
     )
 
-    try:
-        await loading_message.delete()
-    except Exception as e:
-        print(f"Error deleting loading message: {e}")
+    await loading_message.delete()
 
     if corrected_suggestions:
         buttons = []
@@ -564,7 +554,7 @@ async def search(_, msg: Message):
                     url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                 )
             ])
-
+        
         lang_buttons = [
             InlineKeyboardButton("বেঙ্গলি", callback_data=f"lang_Bengali_{query_clean}"),
             InlineKeyboardButton("হিন্দি", callback_data=f"lang_Hindi_{query_clean}"),
@@ -576,16 +566,16 @@ async def search(_, msg: Message):
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
     else:
         Google_Search_url = "https://www.google.com/search?q=" + urllib.parse.quote(query)
-
+        
         request_button = InlineKeyboardButton("এই মুভির জন্য অনুরোধ করুন", callback_data=f"request_movie_{user_id}_{urllib.parse.quote_plus(query)}")
         google_button_row = [InlineKeyboardButton("গুগলে সার্চ করুন", url=Google_Search_url)]
-
+        
         reply_markup_for_no_result = InlineKeyboardMarkup([
             google_button_row,
             [request_button]
         ])
 
-        alert = await msg.reply_text(
+        alert = await msg.reply_text( 
             """
 ❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।
 
@@ -639,20 +629,20 @@ async def callback_handler(_, cq: CallbackQuery):
 
     elif data.startswith("lang_"):
         _, lang, query_clean = data.split("_", 2)
-
+        
         potential_lang_matches_cursor = movies_col.find(
             {"language": lang, "title_clean": {"$regex": query_clean, "$options": "i"}},
             {"title": 1, "message_id": 1, "title_clean": 1, "views_count": 1}
         ).limit(50)
 
         potential_lang_matches = list(potential_lang_matches_cursor)
-
+        
         fuzzy_data_for_matching_lang = [
-            {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"],
+            {"title_clean": m["title_clean"], "original_title": m["title"], "message_id": m["message_id"], 
              "language": lang, "views_count": m.get("views_count", 0)}
             for m in potential_lang_matches
         ]
-
+        
         loop = asyncio.get_running_loop()
         matches_filtered_by_lang = await loop.run_in_executor(
             thread_pool_executor,
@@ -689,9 +679,9 @@ async def callback_handler(_, cq: CallbackQuery):
             "request_time": datetime.now(UTC),
             "status": "pending"
         })
-
+        
         await cq.answer(f"আপনার অনুরোধ '{movie_name}' সফলভাবে জমা দেওয়া হয়েছে।", show_alert=True)
-
+        
         admin_request_btns = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ সম্পন্ন হয়েছে", callback_data=f"req_fulfilled_{user_id}_{encoded_movie_name}"),
             InlineKeyboardButton("❌ বাতিল করা হয়েছে", callback_data=f"req_rejected_{user_id}_{encoded_movie_name}")
@@ -709,7 +699,7 @@ async def callback_handler(_, cq: CallbackQuery):
                 )
             except Exception as e:
                 print(f"Could not notify admin {admin_id} about request from callback: {e}")
-
+        
         try:
             edited_msg = await cq.message.edit_text(
                 f"❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।\n\n"
@@ -726,7 +716,7 @@ async def callback_handler(_, cq: CallbackQuery):
         user_id = int(user_id_str)
 
         movie = movies_col.find_one({"message_id": movie_message_id})
-
+        
         if not movie:
             await cq.answer("দুঃখিত, এই মুভিটি খুঁজে পাওয়া যায়নি।", show_alert=True)
             return
@@ -740,10 +730,10 @@ async def callback_handler(_, cq: CallbackQuery):
             update_query["$inc"]["likes"] = 1
         elif action == "dislike":
             update_query["$inc"]["dislikes"] = 1
-
-        movies_col.update_one({"message_id": movie_message_id, "channel_id": movie["channel_id"]}, update_query)
-
-        updated_movie = movies_col.find_one({"message_id": movie_message_id, "channel_id": movie["channel_id"]})
+        
+        movies_col.update_one({"message_id": movie_message_id}, update_query)
+        
+        updated_movie = movies_col.find_one({"message_id": movie_message_id})
         updated_likes = updated_movie.get('likes', 0)
         updated_dislikes = updated_movie.get('dislikes', 0)
 
@@ -761,32 +751,9 @@ async def callback_handler(_, cq: CallbackQuery):
             print(f"Error editing message after rating: {e}")
             await cq.answer("রেটিং আপডেট করতে সমস্যা হয়েছে।", show_alert=True)
 
-    elif data.startswith("req_fulfilled_") or data.startswith("req_rejected_"):
-        action, user_id_str, encoded_movie_name = data.split("_", 2)
-        user_id = int(user_id_str)
-        movie_name = urllib.parse.unquote_plus(encoded_movie_name)
-
-        status_text = "সম্পন্ন" if action == "req_fulfilled" else "বাতিল"
-        message_to_user = f"আপনার অনুরোধ **'{movie_name}'** {status_text} করা হয়েছে।"
-
-        requests_col.update_one(
-            {"user_id": user_id, "movie_name": movie_name, "status": "pending"},
-            {"$set": {"status": status_text.lower(), "admin_action_time": datetime.now(UTC)}}
-        )
-
-        try:
-            await app.send_message(user_id, message_to_user)
-            await cq.answer(f"ব্যবহারকারীকে জানানো হয়েছে: {status_text}", show_alert=True)
-            await cq.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(f"✅ {status_text} হয়েছে", callback_data="noop")
-            ]]))
-        except Exception as e:
-            await cq.answer("ব্যবহারকারীকে বার্তা পাঠানো যায়নি ❌", show_alert=True)
-            print(f"Error sending request fulfillment/rejection message to user {user_id}: {e}")
-
     elif "_" in data:
         parts = data.split("_", 3)
-        if len(parts) == 4 and parts[0] in ["has", "no", "soon", "wrong"]:
+        if len(parts) == 4 and parts[0] in ["has", "no", "soon", "wrong"]: 
             action, uid, mid, raw_query = parts
             uid = int(uid)
             responses = {
@@ -808,198 +775,8 @@ async def callback_handler(_, cq: CallbackQuery):
         else:
             await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
 
-
-# নতুন ফিচার: চ্যানেল কানেক্ট এবং ডিসকানেক্ট
-@app.on_message(filters.command("connect") & filters.user(ADMIN_IDS) & filters.private)
-async def connect_channel(_, msg: Message):
-    if len(msg.command) < 2:
-        help_msg = await msg.reply(
-            "ব্যবহার: `/connect <channel_id>`\n"
-            "উদাহরণ: `/connect -1001234567890`"
-        )
-        asyncio.create_task(delete_message_later(help_msg.chat.id, help_msg.id))
-        return
-
-    try:
-        channel_id = int(msg.command[1])
-    except ValueError:
-        error_msg = await msg.reply("অনুগ্রহ করে একটি সঠিক চ্যানেল আইডি দিন।")
-        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-        return
-
-    # Check if bot is admin in the channel
-    try:
-        chat_member = await app.get_chat_member(channel_id, app.me.id)
-        if not chat_member.can_read_messages:
-            error_msg = await msg.reply(
-                "বট এই চ্যানেলের মেসেজ পড়তে পারছে না। নিশ্চিত করুন বট এই চ্যানেলে অ্যাডমিন এবং তার 'Read Messages' পারমিশন আছে।"
-            )
-            asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-            return
-    except Exception as e:
-        error_msg = await msg.reply(
-            f"চ্যানেলের তথ্য পেতে ব্যর্থ বা বট চ্যানেলের সদস্য নয়। নিশ্চিত করুন চ্যানেল আইডি সঠিক এবং বট চ্যানেলে আছে।\nএরর: {e}"
-        )
-        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-        return
-
-    # Add channel to connected_channels_col
-    try:
-        connected_channels_col.update_one(
-            {"channel_id": channel_id},
-            {"$set": {"connected_time": datetime.now(UTC)}},
-            upsert=True
-        )
-        conn_msg = await msg.reply(f"✅ চ্যানেল `{channel_id}` সফলভাবে কানেক্ট করা হয়েছে।")
-        asyncio.create_task(delete_message_later(conn_msg.chat.id, conn_msg.id))
-    except DuplicateKeyError:
-        already_conn_msg = await msg.reply(f"চ্যানেল `{channel_id}` ইতিমধ্যেই কানেক্ট করা আছে।")
-        asyncio.create_task(delete_message_later(already_conn_msg.chat.id, already_conn_msg.id))
-        return
-
-    # Start importing existing messages
-    importing_msg = await msg.reply(f"চ্যানেল `{channel_id}` থেকে বিদ্যমান মুভি ইম্পোর্ট শুরু হচ্ছে... এতে সময় লাগতে পারে।")
-    asyncio.create_task(delete_message_later(importing_msg.chat.id, importing_msg.id))
-
-    imported_count = 0
-    try:
-        # Iterate through messages in the channel
-        async for message in app.get_chat_history(channel_id):
-            if message.text or message.caption:
-                status = await save_movie_to_db(message)
-                if status == "inserted":
-                    imported_count += 1
-            await asyncio.sleep(0.01) # Small delay to avoid FloodWait
-
-    except Exception as e: # pyrogram.errors.FloodWait সহ সব এরর এখানে ধরা হবে
-        if "FloodWait" in str(e):
-            wait_time = int(re.search(r'(\d+)', str(e)).group(1)) if re.search(r'(\d+)', str(e)) else 10 # Default to 10 seconds
-            flood_wait_msg = await msg.reply(f"FloodWait এর কারণে ইম্পোর্ট থামানো হয়েছে: {wait_time} সেকেন্ড অপেক্ষা করুন।")
-            asyncio.create_task(delete_message_later(flood_wait_msg.chat.id, flood_wait_msg.id))
-            await asyncio.sleep(wait_time)
-        else:
-            error_import_msg = await msg.reply(f"ইম্পোর্ট করার সময় একটি এরর হয়েছে: {e}")
-            asyncio.create_task(delete_message_later(error_import_msg.chat.id, error_import_msg.id))
-
-    finally:
-        final_import_msg = await msg.reply(f"চ্যানেল `{channel_id}` থেকে `{imported_count}` টি মুভি সফলভাবে ইম্পোর্ট/আপডেট করা হয়েছে।")
-        asyncio.create_task(delete_message_later(final_import_msg.chat.id, final_import_msg.id))
-
-
-@app.on_message(filters.command("disconnect") & filters.user(ADMIN_IDS) & filters.private)
-async def disconnect_channel(_, msg: Message):
-    if len(msg.command) < 2:
-        help_msg = await msg.reply(
-            "ব্যবহার: `/disconnect <channel_id>`\n"
-            "উদাহরণ: `/disconnect -1001234567890`"
-        )
-        asyncio.create_task(delete_message_later(help_msg.chat.id, help_msg.id))
-        return
-
-    try:
-        channel_id = int(msg.command[1])
-    except ValueError:
-        error_msg = await msg.reply("অনুগ্রহ করে একটি সঠিক চ্যানেল আইডি দিন।")
-        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-        return
-
-    result = connected_channels_col.delete_one({"channel_id": channel_id})
-
-    if result.deleted_count > 0:
-        disc_msg = await msg.reply(f"✅ চ্যানেল `{channel_id}` সফলভাবে ডিসকানেক্ট করা হয়েছে। এই চ্যানেলের নতুন পোস্ট আর সেভ হবে না।")
-        asyncio.create_task(delete_message_later(disc_msg.chat.id, disc_msg.id))
-    else:
-        not_found_msg = await msg.reply(f"চ্যানেল `{channel_id}` কানেক্টেড অবস্থায় খুঁজে পাওয়া যায়নি।")
-        asyncio.create_task(delete_message_later(not_found_msg.chat.id, not_found_msg.id))
-
-
-@app.on_message(filters.command("list_connected") & filters.user(ADMIN_IDS) & filters.private)
-async def list_connected_channels(_, msg: Message):
-    connected_channels = list(connected_channels_col.find({}))
-    if not connected_channels:
-        m = await msg.reply("কোনো চ্যানেল কানেক্ট করা নেই।")
-        asyncio.create_task(delete_message_later(m.chat.id, m.id))
-        return
-
-    response_text = "কানেক্টেড চ্যানেলসমূহ:\n"
-    for channel in connected_channels:
-        response_text += f"- `{channel['channel_id']}` (কানেক্টেড: {channel.get('connected_time', 'N/A').strftime('%Y-%m-%d %H:%M:%S')})\n"
-
-    m = await msg.reply(response_text)
-    asyncio.create_task(delete_message_later(m.chat.id, m.id))
-
-
-@app.on_message(filters.command("savemovie") & filters.user(ADMIN_IDS) & filters.private)
-async def save_movie_from_other_channel(_, msg: Message):
-    if len(msg.command) < 3 and not msg.reply_to_message:
-        help_msg = await msg.reply(
-            "ব্যবহার: `/savemovie <channel_id> <message_id>`\n"
-            "উদাহরণ: `/savemovie -1001234567890 123`\n\n"
-            "অথবা, অন্য চ্যানেলের কোনো পোস্টকে রিপ্লাই করে `/savemovie` কমান্ডটি ব্যবহার করুন।"
-        )
-        asyncio.create_task(delete_message_later(help_msg.chat.id, help_msg.id))
-        return
-
-    target_channel_id = None
-    target_message_id = None
-
-    if msg.reply_to_message:
-        target_channel_id = msg.reply_to_message.chat.id
-        target_message_id = msg.reply_to_message.id
-    else:
-        try:
-            target_channel_id = int(msg.command[1])
-            target_message_id = int(msg.command[2])
-        except ValueError:
-            error_msg = await msg.reply("অনুগ্রহ করে সঠিক চ্যানেল আইডি এবং মেসেজ আইডি দিন।")
-            asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-            return
-
-    try:
-        target_message = await app.get_messages(target_channel_id, target_message_id)
-        if not target_message:
-            error_msg = await msg.reply("নির্দিষ্ট চ্যানেল বা মেসেজ আইডি খুঁজে পাওয়া যায়নি।")
-            asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-            return
-
-        text = target_message.text or target_message.caption
-        if not text:
-            error_msg = await msg.reply("এই মেসেজটিতে কোনো টেক্সট বা ক্যাপশন নেই, তাই সেভ করা যাচ্ছে না।")
-            asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-            return
-
-        status = await save_movie_to_db(target_message)
-
-        if status == "inserted":
-            success_msg = await msg.reply(
-                f"✅ মুভিটি সফলভাবে ডাটাবেসে সেভ করা হয়েছে!\n"
-                f"টাইটেল: `{text.splitlines()[0][:100]}`\n"
-                f"চ্যানেল আইডি: `{target_channel_id}`\n"
-                f"মেসেজ আইডি: `{target_message_id}`"
-            )
-            asyncio.create_task(delete_message_later(success_msg.chat.id, success_msg.id))
-        elif status == "updated":
-            success_msg = await msg.reply(
-                f"🔄 মুভিটি ইতিমধ্যেই ডাটাবেসে ছিল এবং সফলভাবে আপডেট করা হয়েছে!\n"
-                f" টাইটেল: `{text.splitlines()[0][:100]}`"
-            )
-            asyncio.create_task(delete_message_later(success_msg.chat.id, success_msg.id))
-        elif status == "unchanged":
-            info_msg = await msg.reply("মুভিটি ইতিমধ্যেই ডাটাবেসে বিদ্যমান এবং কোনো পরিবর্তনের প্রয়োজন হয়নি।")
-            asyncio.create_task(delete_message_later(info_msg.chat.id, info_msg.id))
-        elif status == "duplicate":
-            info_msg = await msg.reply("মুভিটি ইতিমধ্যেই ডাটাবেসে বিদ্যমান ছিল (ডুপ্লিকেট)।")
-            asyncio.create_task(delete_message_later(info_msg.chat.id, info_msg.id))
-        else: # status == "error"
-            error_msg = await msg.reply(f"মুভি সেভ করতে ব্যর্থ: কিছু একটা ভুল হয়েছে।")
-            asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-
-    except Exception as e:
-        error_msg = await msg.reply(f"মুভি সেভ করতে ব্যর্থ: {e}")
-        asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
-        print(f"Error saving movie from other channel: {e}")
-
-
-if __name__ == "__main__":
-    print("বট শুরু হচ্ছে...")
-    app.run()
+# বট শুরু করার জন্য
+# if __name__ == "__main__":
+#     print("বট শুরু হচ্ছে...")
+#     app.run() # এটি বদলে দিন
+#     asyncio.run(main()) # এটি ব্যবহার করুন যদি আপনি Pyrogram 2.0+ ব্যবহার করেন এবং main ফাংশন ব্যবহার করতে চান
