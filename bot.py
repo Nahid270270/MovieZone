@@ -1,16 +1,18 @@
+import os
+import re
+import asyncio
+import urllib.parse
+from datetime import datetime, UTC, timedelta
+from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
+from fuzzywuzzy import process
+
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import OperationFailure, CollectionInvalid, DuplicateKeyError
 from flask import Flask
-from threading import Thread
-import os
-import re
-from datetime import datetime, UTC, timedelta
-import asyncio
-import urllib.parse
-from fuzzywuzzy import process
-from concurrent.futures import ThreadPoolExecutor
+
 
 # Configs - নিশ্চিত করুন এই ভেরিয়েবলগুলো আপনার এনভায়রনমেন্টে সেট করা আছে।
 # IMPORTANT: API_ID, API_HASH, BOT_TOKEN, DATABASE_URL MUST be set.
@@ -171,11 +173,6 @@ async def save_movie_to_db(msg: Message):
 
 
 # dynamic_chat_filter logic
-async def get_connected_channel_ids():
-    channels = connected_channels_col.find({})
-    return [channel["channel_id"] for channel in channels]
-
-# This is the corrected filter function
 async def dynamic_channel_check(filter_instance, client_instance, msg: Message):
     # Only process messages from channels/supergroups
     if msg.chat.type not in ["channel", "supergroup"]:
@@ -183,8 +180,12 @@ async def dynamic_channel_check(filter_instance, client_instance, msg: Message):
     connected_ids = await get_connected_channel_ids()
     return msg.chat.id in connected_ids
 
+async def get_connected_channel_ids():
+    channels = connected_channels_col.find({})
+    return [channel["channel_id"] for channel in channels]
+
 # Register the dynamic filter
-dynamic_chat_filter = filters.create("DynamicChatFilter", dynamic_channel_check)
+dynamic_chat_filter = filters.create(dynamic_channel_check, "DynamicChatFilter")
 
 
 @app.on_message(dynamic_chat_filter) # Use the dynamic filter here
@@ -808,7 +809,12 @@ async def callback_handler(_, cq: CallbackQuery):
             await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
 
 
-# নতুন ফিচার: চ্যানেল কানেক্ট এবং ডিসকানেক্ট
+---
+## নতুন ফিচার: চ্যানেল কানেক্ট এবং ডিসকানেক্ট
+
+এখানে `connect` এবং `disconnect` কমান্ডের মাধ্যমে বটকে চ্যানেলের সাথে যুক্ত বা বিচ্ছিন্ন করার ফাংশনালিটি রয়েছে।
+
+```python
 @app.on_message(filters.command("connect") & filters.user(ADMIN_IDS) & filters.private)
 async def connect_channel(_, msg: Message):
     if len(msg.command) < 2:
