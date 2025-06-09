@@ -80,7 +80,13 @@ flask_app = Flask(__name__)
 @flask_app.route("/")
 def home():
     return "Bot is running!"
-Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start()
+
+# Flask অ্যাপকে একটি পৃথক থ্রেডে শুরু করুন
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=8080)
+
+Thread(target=run_flask).start()
+
 
 # Initialize a global ThreadPoolExecutor for running blocking functions (like fuzzywuzzy)
 thread_pool_executor = ThreadPoolExecutor(max_workers=5)
@@ -234,12 +240,6 @@ async def sync_channels():
 
         await asyncio.sleep(300) # Wait 5 minutes before re-syncing all channels again
 
-# Start the sync task when the bot is ready
-@app.on_ready
-async def on_ready_callback(client):
-    print("Bot is ready. Starting channel sync task...")
-    asyncio.create_task(sync_channels())
-
 
 # --- Telegram Message Handlers ---
 
@@ -293,8 +293,8 @@ async def start(_, msg: Message):
                     reply_to_message_id=copied_message.id
                 )
                 asyncio.create_task(delete_message_later(rating_message.chat.id, rating_message.id))
-                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id))
-
+                asyncio.create_task(delete_message_later(copied_message.chat.id, copied_message.id)) # কপি করা মেসেজও ডিলিট হবে
+            
             movies_col.update_one(
                 {"message_id": message_id, "source_channel_id": source_channel_id},
                 {"$inc": {"views_count": 1}}
@@ -465,6 +465,8 @@ async def connect_channel(_, msg: Message):
             error_msg_text = f"ভুল চ্যানেল আইডি। নিশ্চিত করুন আইডি সঠিক এবং বট চ্যানেলের সদস্য।: {e}"
         elif "CHANNEL_PRIVATE" in str(e):
             error_msg_text = f"চ্যানেলটি ব্যক্তিগত। নিশ্চিত করুন বটকে অ্যাডমিন হিসেবে যোগ করা হয়েছে।: {e}"
+        elif "USER_NOT_PARTICIPANT" in str(e):
+            error_msg_text = f"বট এই চ্যানেলের সদস্য নয়। দয়া করে বটকে চ্যানেলে যোগ করুন।: {e}"
         
         error_msg = await msg.reply(error_msg_text)
         asyncio.create_task(delete_message_later(error_msg.chat.id, error_msg.id))
@@ -854,7 +856,7 @@ async def callback_handler(_, cq: CallbackQuery):
             edited_msg = await cq.message.edit_text(
                 f"❌ দুঃখিত! আপনার খোঁজা মুভিটি খুঁজে পাওয়া যায়নি।\n\n"
                 f"আপনার অনুরোধ **'{movie_name}'** জমা দেওয়া হয়েছে। এডমিনরা এটি পর্যালোচনা করবেন।",
-                reply_markup=None
+                reply_markup=None # রিপ্লাই মার্কআপ মুছে ফেলা হয়েছে
             )
             asyncio.create_task(delete_message_later(edited_msg.chat.id, edited_msg.id))
         except Exception as e:
@@ -907,32 +909,55 @@ async def callback_handler(_, cq: CallbackQuery):
             print(f"Error editing message after rating: {e}")
             await cq.answer("রেটিং আপডেট করতে সমস্যা হয়েছে।", show_alert=True)
 
-    elif "_" in data:
+    elif data.startswith("req_fulfilled_") or data.startswith("req_rejected_"):
         parts = data.split("_", 3)
-        if len(parts) == 4 and parts[0] in ["has", "no", "soon", "wrong"]: 
-            action, uid, mid, raw_query = parts
-            uid = int(uid)
-            responses = {
-                "has": f"✅ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাটাবেজে আছে। সঠিক নাম লিখে আবার চেষ্টা করুন।",
-                "no": f"❌ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাটাবেজে নেই।",
-                "soon": f"⏳ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি শীঘ্রই আসবে।",
-                "wrong": f"✏️ @{cq.from_user.username or cq.from_user.first_name} বলছেন যে আপনি ভুল নাম লিখেছেন: **{raw_query}**।"
-            }
-            if action in responses:
-                try:
-                    m = await app.send_message(uid, responses[action])
-                    asyncio.create_task(delete_message_later(m.chat.id, m.id))
-                    await cq.answer("অ্যাডমিনের পক্ষ থেকে উত্তর পাঠানো হয়েছে।")
-                except Exception as e:
-                    await cq.answer("ইউজারকে বার্তা পাঠাতে সমস্যা হয়েছে।", show_alert=True)
-                    print(f"Error sending admin feedback message: {e}")
-            else:
-                await cq.answer("অকার্যকর কলব্যাক ডেটা।", show_alert=True)
-    
+        action, user_id_str, encoded_movie_name = parts[1], parts[2], parts[3]
+        user_id = int(user_id_str)
+        movie_name = urllib.parse.unquote_plus(encoded_movie_name)
+        
+        new_status = "fulfilled" if action == "fulfilled" else "rejected"
+        requests_col.update_one(
+            {"user_id": user_id, "movie_name": movie_name, "status": "pending"},
+            {"$set": {"status": new_status, "admin_response_time": datetime.now(UTC)}}
+        )
+
+        user_message = ""
+        if new_status == "fulfilled":
+            user_message = f"✅ আপনার অনুরোধ করা মুভি **'{movie_name}'** এখন উপলব্ধ! অনুগ্রহ করে বট এ সার্চ করে খুঁজে নিন।"
+        else:
+            user_message = f"❌ দুঃখিত! আপনার অনুরোধ করা মুভি **'{movie_name}'** বাতিল করা হয়েছে। কিছু কারণে এটি যোগ করা সম্ভব হচ্ছে না।"
+        
+        try:
+            await app.send_message(user_id, user_message)
+            await cq.answer("ব্যবহারকারীকে সফলভাবে জানানো হয়েছে।", show_alert=True)
+            # অ্যাডমিন মেসেজের বাটন পরিবর্তন করুন
+            await cq.message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(f"✅ উত্তর দেওয়া হয়েছে: {'সম্পন্ন' if new_status == 'fulfilled' else 'বাতিল'}", callback_data="noop")
+                ]])
+            )
+        except Exception as e:
+            await cq.answer("ব্যবহারকারীকে বার্তা পাঠানো যায়নি।", show_alert=True)
+            print(f"Error sending request fulfillment/rejection message to user {user_id}: {e}")
+
     elif data == "noop":
         await cq.answer()
 
 
 if __name__ == "__main__":
     print("বট শুরু হচ্ছে...")
-    app.run()
+    # Pyrogram ক্লায়েন্ট শুরু করুন এবং চ্যানেল সিঙ্ক টাস্ক শুরু করুন
+    try:
+        app.start()
+        print("বট সফলভাবে শুরু হয়েছে। চ্যানেল সিঙ্ক টাস্ক শুরু হচ্ছে...")
+        asyncio.create_task(sync_channels()) # বট শুরু হওয়ার পর sync_channels টাস্ক শুরু করুন
+        asyncio.get_event_loop().run_forever() # ইভেন্ট লুপ চলতে থাকবে যাতে বট সক্রিয় থাকে
+    except KeyboardInterrupt:
+        print("বট বন্ধ করা হচ্ছে...")
+    except Exception as e:
+        print(f"বট শুরু করার সময় একটি ত্রুটি হয়েছে: {e}")
+    finally:
+        if app.is_connected:
+            app.stop()
+            print("বট বন্ধ হয়েছে।")
+
