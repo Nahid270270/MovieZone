@@ -193,7 +193,7 @@ async def start(_, msg: Message):
                         InlineKeyboardButton(f"👍 লাইক ({likes_count})", callback_data=f"like_{message_id}_{user_id}"),
                         InlineKeyboardButton(f"👎 ডিসলাইক ({dislikes_count})", callback_data=f"dislike_{message_id}_{user_id}")
                     ],
-                    [
+                    [ # ফেভারিট বাটন এখানে যোগ করা হয়েছে
                         InlineKeyboardButton(favorite_button_text, callback_data=favorite_callback_data)
                     ]
                 ])
@@ -419,14 +419,14 @@ async def request_movie(_, msg: Message):
         try:
             await app.send_message(
                 admin_id,
-                f"❗ *নতুন মুভির অনুরোধ!*\n\n"
+                f"❗ *নতুন মুভির অনুরোধ (ইনলাইন বাটন থেকে)!*\n\n"
                 f"🎬 মুভির নাম: `{movie_name}`\n"
                 f"👤 ইউজার: [{username}](tg://user?id={user_id}) (`{user_id}`)",
                 reply_markup=admin_request_btns,
                 disable_web_page_preview=True
             )
         except Exception as e:
-            print(f"Could not notify admin {admin_id} about request: {e}")
+            print(f"Could not notify admin {admin_id} about request from callback: {e}")
 
 @app.on_message(filters.command("favorites") & filters.private)
 async def view_favorites(_, msg: Message):
@@ -506,23 +506,17 @@ async def search(_, msg: Message):
     if matched_movies_direct:
         await loading_message.delete()
         buttons = []
-        user_data = users_col.find_one({"_id": user_id}) # Fetch user data once
-        user_favorite_movies = user_data.get("favorite_movies", []) if user_data else []
-
         for movie in matched_movies_direct:
-            is_favorited = movie["message_id"] in user_favorite_movies
-            favorite_button_text = "❌ ফেভারিট থেকে সরান" if is_favorited else "⭐ ফেভারিটে যোগ করুন"
-            favorite_callback_data = f"toggle_favorite_{movie['message_id']}"
-
             buttons.append([
                 InlineKeyboardButton(
                     text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)",
                     url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                 )
             ])
-            buttons.append([
-                InlineKeyboardButton(favorite_button_text, callback_data=favorite_callback_data)
-            ])
+            # সার্চ রেজাল্ট থেকে ফেভারিট বাটন সরানো হয়েছে
+            # buttons.append([
+            #     InlineKeyboardButton(favorite_button_text, callback_data=favorite_callback_data)
+            # ])
 
         m = await msg.reply("🎬 নিচের রেজাল্টগুলো পাওয়া গেছে:", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
         asyncio.create_task(delete_message_later(m.chat.id, m.id))
@@ -548,23 +542,17 @@ async def search(_, msg: Message):
 
     if corrected_suggestions:
         buttons = []
-        user_data = users_col.find_one({"_id": user_id}) # Fetch user data once
-        user_favorite_movies = user_data.get("favorite_movies", []) if user_data else []
-
         for movie in corrected_suggestions:
-            is_favorited = movie["message_id"] in user_favorite_movies
-            favorite_button_text = "❌ ফেভারিট থেকে সরান" if is_favorited else "⭐ ফেভারিটে যোগ করুন"
-            favorite_callback_data = f"toggle_favorite_{movie['message_id']}"
-
             buttons.append([
                 InlineKeyboardButton(
                     text=f"{movie['title'][:40]} ({movie.get('views_count', 0)} ভিউ)",
                     url=f"https://t.me/{app.me.username}?start=watch_{movie['message_id']}"
                 )
             ])
-            buttons.append([
-                InlineKeyboardButton(favorite_button_text, callback_data=favorite_callback_data)
-            ])
+            # ফাজি সার্চ রেজাল্ট থেকেও ফেভারিট বাটন সরানো হয়েছে
+            # buttons.append([
+            #     InlineKeyboardButton(favorite_button_text, callback_data=favorite_callback_data)
+            # ])
 
         lang_buttons = [
             InlineKeyboardButton("বেঙ্গলি", callback_data=f"lang_Bengali_{query_clean}"),
@@ -666,17 +654,18 @@ async def callback_handler(_, cq: CallbackQuery):
 
         if matches_filtered_by_lang:
             buttons = []
-            user_id = cq.from_user.id
-            user_data = users_col.find_one({"_id": user_id})
-            user_favorite_movies = user_data.get("favorite_movies", []) if user_data else []
+            # ভাষাভিত্তিক সার্চ রেজাল্ট থেকেও ফেভারিট বাটন সরানো হয়েছে
+            # user_id = cq.from_user.id
+            # user_data = users_col.find_one({"_id": user_id})
+            # user_favorite_movies = user_data.get("favorite_movies", []) if user_data else []
 
             for m in matches_filtered_by_lang[:RESULTS_COUNT]:
-                is_favorited = m["message_id"] in user_favorite_movies
-                favorite_button_text = "❌ ফেভারিট থেকে সরান" if is_favorited else "⭐ ফেভারিটে যোগ করুন"
-                favorite_callback_data = f"toggle_favorite_{m['message_id']}"
+                # is_favorited = m["message_id"] in user_favorite_movies
+                # favorite_button_text = "❌ ফেভারিট থেকে সরান" if is_favorited else "⭐ ফেভারিটে যোগ করুন"
+                # favorite_callback_data = f"toggle_favorite_{m['message_id']}"
 
                 buttons.append([InlineKeyboardButton(f"{m['title'][:40]} ({m.get('views_count',0)} ভিউ)", url=f"https://t.me/{app.me.username}?start=watch_{m['message_id']}")])
-                buttons.append([InlineKeyboardButton(favorite_button_text, callback_data=favorite_callback_data)])
+                # buttons.append([InlineKeyboardButton(favorite_button_text, callback_data=favorite_callback_data)])
             reply_msg = await cq.message.edit_text(
                 f"ফলাফল ({lang}) - নিচের থেকে সিলেক্ট করুন:",
                 reply_markup=InlineKeyboardMarkup(buttons)
@@ -839,7 +828,7 @@ async def callback_handler(_, cq: CallbackQuery):
             uid = int(uid)
             responses = {
                 "has": f"✅ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাটাবেজে আছে। সঠিক নাম লিখে আবার চেষ্টা করুন।",
-                "no": f"❌ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাataবেজে নেই।",
+                "no": f"❌ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি ডাটাবেজে নেই।",
                 "soon": f"⏳ @{cq.from_user.username or cq.from_user.first_name} জানিয়েছেন যে **{raw_query}** মুভিটি শীঘ্রই আসবে।",
                 "wrong": f"✏️ @{cq.from_user.username or cq.from_user.first_name} বলছেন যে আপনি ভুল নাম লিখেছেন: **{raw_query}**।"
             }
